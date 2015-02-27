@@ -1,0 +1,166 @@
+.. _index:
+
+Welcome
+=======
+
+Pylearn2 is still undergoing rapid development. Don't expect a clean road without bumps!
+If you find a bug please write to pylearn-dev@googlegroups.com.
+If you're a Pylearn2 developer and you find a bug, please write a unit test for it so
+the bug doesn't come back!
+
+
+Pylearn2 is a machine learning library. Most of its functionality is built on top of
+`Theano <http://deeplearning.net/software/theano/>`_. 
+This means you can write Pylearn2 plugins (new models, algorithms, etc) using
+mathematical expressions, and theano will optimize and stabilize those expressions for
+you, and compile them to a backend of your choice (CPU or GPU).
+
+Pylearn2 Vision
+===============
+
+* Researchers add features as they need them. We avoid getting bogged down by too
+  much top-down planning in advance.
+* A machine learning toolbox for easy scientific experimentation.
+* All models/algorithms published by the LISA lab should have reference implementations
+  in Pylearn2.
+* Pylearn2 may wrap other libraries such as scikits.learn when this is practical
+* Pylearn2 differs from scikits.learn in that Pylearn2 aims to provide great flexibility
+  and make it possible for a researcher to do almost anything, while scikits.learn
+  aims to work as a "black box" that can produce good results even if the user does not
+  understand the implementation
+* Dataset interface for vector, images, video, ...
+* Small framework for all what is needed for one normal MLP/RBM/SDA/Convolution experiments.
+* Easy reuse of sub-component of Pylearn2.
+* Using one sub-component of the library does not force you to use / learn to use all of
+  the other sub-components if you choose not to.
+* Support cross-platform serialization of learned models.
+* Remain approachable enough to be used in the classroom (IFT6266 at the University of Montreal).
+
+Download and installation
+=========================
+
+No PyPI download yet. You must checkout the version in github for bleeding-edge/development
+version, available via:
+
+.. code-block:: bash
+
+   git clone git://github.com/lisa-lab/pylearn2.git
+
+You also need to set your PYLEARN2_DATA_PATH variable. On linux, the best way to do this
+is to add a line to your .bashrc file:
+
+.. code-block:: bash
+
+    export PYLEARN2_DATA_PATH=/data/lisa/data
+
+Note that this is only an example, and if you are not in the LISA lab, you will need to
+choose a directory path that is valid on your filesystem. Simply choose a path where
+it will be convenient for you to store datasets for use with Pylearn2.
+
+Other methods
+-------------
+
+Vagrant (any OS)
+~~~~~~~~~~~~~~~~
+
+`Pylearn2 in a box <https://github.com/ironchief/pylearn2_vagrant>`_ uses Vagrant to easily create a new VM installed with Pylearn2 and the necessary packages.
+
+1. Download and install Vagrant http://www.vagrantup.com/
+2. Download and install Virtual Box and VirtualBox Extension Pack https://www.virtualbox.org/wiki/Downloads
+3. Download the Vagrant scripts from `Pylearn2 in a box <https://github.com/ironchief/pylearn2_vagrant>`_
+4. Start the VM by running ``vagrant up`` in the directory from step 3
+
+Dependencies
+============
+
+* `Theano <http://deeplearning.net/software/theano/>`_ and its dependencies are required to use
+  Pylearn2. Since pylearn2 is under rapid development some of its features might depend on the `bleeding-edge version of Theano <http://deeplearning.net/software/theano/install.html#bleeding-edge-install-instructions>`_.
+* PyYAML is required for most functionality.
+* PIL is required for some image-related functionality.
+* Some dependencies are optional:
+    * Pylearn2 includes code for accessing several standard datasets, such as MNIST and CIFAR-10.
+      However, if you wish to use one of these datasets, you must download the dataset itself
+      manually.
+    * The original `Pylearn <http://deeplearning.net/software/pylearn/>`_ project is required
+      for loading some datasets, such as the Unsupervised and Transfer Learning Challenge datasets
+    * Some features (SVMs) depend on scikits-learn.
+
+
+Documentation
+=============
+
+Roughly in order of what you'll want to check out:
+
+* :ref:`tutorial` -- Learn the basics via an example.
+* :ref:`yaml_tutorial` -- A tutorial on YAML tags employed by Pylearn2.
+* :ref:`notebook_tutorials` -- At this point, you might want to work through the ipython notebooks in the "scripts/tutorials"
+  directory.
+* :ref:`features` -- A list of features available in the library.
+* :ref:`overview` -- A detailed but high-level overview of how Pylearn2 works. This is the
+  place to start if you want to really learn the library.
+* :ref:`libdoc` -- Documentation of the libray modules.
+* :ref:`cluster` -- The tools we use at LISA for running Pylearn2 jobs on HPC clusters.
+* :ref:`vision` -- Some more detailed elaboration of some points of the Pylearn2 vision.
+
+
+Community
+=========
+
+* Register and post to `pylearn-users`_ for general inquiries and support questions or if you want to talk to other users.
+
+* Register and post to `pylearn-dev`_ if you want to talk to the developers. We don't bite.
+
+* Register to `pylearn2-github`_ if you want to receive an email for all changes to the GitHub
+  repository.
+
+* Register to `theano-buildbot`_ if you want to receive our daily
+  buildbot email. This is the buildbot for Pylearn2, Theano, Pylearn
+  and the Deep Learning Tutorial.
+
+* Ask/view questions/answers about machine learning in general at
+  `metaoptimize/qa/tags/theano`_ (it's like stack overflow for machine learning)
+
+* We use the `github issues <https://github.com/lisa-lab/pylearn2/issues>`_ to stay organized.
+
+* Come visit us in Montreal!  Most of the developers are students in the LISA_ group at the `University of Montreal`_.
+
+Developer
+=========
+
+* Register to everything listed in the Community section above
+* Follow the LISA lab coding style guidelines:
+  http://deeplearning.net/software/pylearn/v2_planning/API_coding_style.html
+
+* :ref:`api_change` -- the best practices guide you should follow when changing any API in the library
+* :ref:`dev_start_guide` -- how to contribute code to Pylearn2
+
+
+
+.. _pylearn-users: https://groups.google.com/group/pylearn-users
+.. _pylearn-dev: https://groups.google.com/group/pylearn-dev
+.. _pylearn2-github: https://groups.google.com/group/pylearn2-github
+.. _theano-buildbot: http://groups.google.com/group/theano-buildbot
+
+.. _metaoptimize/qa/tags/theano: http://metaoptimize.com/qa/tags/theano/
+
+.. _LISA: http://www.iro.umontreal.ca/~lisa
+.. _University of Montreal: http://www.umontreal.ca
+
+
+.. toctree::
+   :maxdepth: 1
+   :hidden:
+
+   library/index
+   api_change
+   cluster
+   features
+   internal/index
+   internal/metadocumentation
+   overview
+   tutorial/index
+   tutorial/with_jobman
+   vision
+   yaml_tutorial/index
+   tutorial/notebook
+   LICENSE
