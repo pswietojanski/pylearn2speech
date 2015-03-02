@@ -487,12 +487,12 @@ def load_params_from_pytables(filepath, container_name='params'):
 
     params = {}
     h5file = tables.openFile(filepath, mode = "r")
-    for node in h5file.walkNodes('/%s'%container_name, "Array"):
+    for node in h5file.walkNodes('/%s/'%container_name, "Array"):
         if params.has_key(node.name):
             raise KeyError('Key already exists %s'%node.name) #it should not happen, but check anyway
         params[node.name] = node.read()
-        print 'ModelPyTables: Lodaing param %s into dictionary (shape is %s and dtype %s)'%\
-                                            (node.name, params[node.name].shape, params[node.name].dtype)
+        #print 'ModelPyTables: Lodaing param %s into dictionary (shape is %s and dtype %s)'%\
+        #                                   (node.name, params[node.name].shape, params[node.name].dtype)
     h5file.close()
     return params
 

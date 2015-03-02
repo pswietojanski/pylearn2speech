@@ -1,13 +1,23 @@
-import os, sys, numpy, subprocess, struct, tempfile, theano, time
 
-from optparse import OptionParser
+__authors__ = "Pawel Swietojanski"
+__copyright__ = "Copyright 2013-2015, University of Edinburgh"
+
+import sys
+import numpy
+import tempfile
+import theano
+import logging
+
+from argparse import ArgumentParser
 from theano import function
 from theano import tensor as T
 
+from pylearn2.models.model import Model
+from pylearn2.datasets.preprocessing_speech import OnlinePreprocessor
 from pylearn2.datasets.speech_utils.kaldi_providers import read_ark_entry_from_buffer, write_ark_entry_to_buffer
-from pylearn2.scripts.pkl_to_pytables import ModelPyTables
 from pylearn2.utils import serial, sharedX
-from pylearn2.datasets.preprocessing_speech import ReorderByBands
+
+log = logging.getLogger(__name__)
 
 class Pylearn2KaldiDecoderProvider(object):
     def __init__(self, model, preprocessor=None):
@@ -24,18 +34,52 @@ class Pylearn2KaldiDecoderProvider(object):
     def set_model_params(self, params):
         self.model.set_params(params)
 
-def instantiate_model(yaml_path):
-    from pylearn2.models.model import Model
-    model = serial.load_train_file(yaml_path)
-    assert isinstance(model, Model)
-    return model
+    def build_fwdprop_function(self, log_priors_nmpy=None):
 
-def instantiate_decoder_provider(yaml_path):
-    
-    from pylearn2.models.model import Model
-    from pylearn2.datasets.preprocessing_speech import OnlinePreprocessor
-    
-    decoder = serial.load_train_file(yaml_path)
+        assert self.model is not None, (
+            "Model not initialised, cannot build forward-pass functions"
+        )
+
+        z = T.matrix('outputs')
+
+        X = self.model.get_input_space().make_batch_theano()
+        X.name = 'X'
+        y = self.model.fprop(X)
+        y.name = 'y'
+
+        z = T.log(y)
+
+        if log_priors_nmpy is not None:
+
+            lp = T.vector('lp')
+            log_priors = sharedX(log_priors_nmpy, name='log_priors')
+
+            z = z - lp
+            self.fprop = function(inputs = [X],
+                             outputs = z,
+                             givens = {lp: log_priors})
+        else:
+            self.fprop = function(inputs = [X], outputs = z)
+
+
+def load_kaldi_priors(path):
+    numbers=numpy.fromregex(path, r"(\d+)", dtype=[('num', numpy.int32)])
+    class_counts=numpy.asarray(numbers['num'], dtype=theano.config.floatX)
+    priors = class_counts/class_counts.sum()
+    #floor zeroes to something small so log() on that will be different from -inf or better skip these in contribution at all i.e. set to -log(0)?
+    priors[priors<1e-10] = 1e-10
+    assert numpy.all(priors > 0) and numpy.all(priors <= 1.0), (
+        "Prior probabilities outside [0,1] range."
+    )
+    log_priors = numpy.log(priors)
+    assert not numpy.any(numpy.isinf(log_priors)), (
+        "Log-priors contain -inf elements."
+    )
+    return log_priors
+
+def instantiate_decoder_from_yaml(yaml_filepath):
+
+    decoder = serial.load_train_file(yaml_filepath)
     
     assert isinstance(decoder, Pylearn2KaldiDecoderProvider)
     assert isinstance(decoder.model, Model)
@@ -43,69 +87,73 @@ def instantiate_decoder_provider(yaml_path):
     
     return decoder
 
-def load_model_pytable(yaml_path, pytable_path, name='Model'):
-    model = instantiate_model(yaml_path)
-    params = ModelPyTables.pytables_to_params(pytable_path, name=name)
-    model.set_params(params)
-    return model
+def prepare_decoder(decoder_yaml_filepath):
+    if decoder_yaml_filepath is not None:
+        decoder = instantiate_decoder_from_yaml(decoder_yaml_filepath)
+    else: #instantiate just empty decoder object
+        decoder = Pylearn2KaldiDecoderProvider(model=None, preprocessor=None)
+    return decoder
 
-def load_decoder_provider(yaml_path='', pytable_path='', pkl_path='', name='Model'):
+def load_model_params_from_pytables(model_pytables_filepath, model_pytables_sd_filepath):
 
-    if pkl_path!='':
-        model = serial.load(pkl_path)
-        #preprocessor = ReorderByBands(23, 11) #fix this!!!
-        preprocessor = None
-        decoder = Pylearn2KaldiDecoderProvider(model, preprocessor=preprocessor)
-    else:
-        decoder = instantiate_decoder_provider(yaml_path)
-        params = ModelPyTables.pytables_to_params(pytable_path, name=name)
+    params = {}
+    #load general parameters (speaker independent)
+    if model_pytables_filepath is not None:
+        params = serial.load_params_from_pytables(model_pytables_filepath, container_name="Model")
+    #and possibly load also speaker dependent ones, which override the
+    #speaker independent ones when the names are the same
+    if model_pytables_sd_filepath is not None:
+        params_sd = serial.load_params_from_pytables(model_pytables_sd_filepath)
+        for sd_key in params_sd.keys():
+            if sd_key in params.keys():
+                log.warning("Key %s appears in both containers %s and %s."
+                            "The latter will override the former in the final model"
+                            %(sd_key, model_pytables_filepath, model_pytables_sd_filepath))
+            params[sd_key] = params_sd[sd_key]
+
+    return params
+
+def prepare_decoding_pipeline(options):
+
+    #prepare decoder from yaml or simply instantiate an empty instance
+    #with model and preprocessors = None
+    decoder = prepare_decoder(options.decoder_yaml)
+    if decoder.model is None:
+        if options.model_pkl is None:
+            raise Exception('Not specified how to build or load the model')
+        model = serial.load(options.model_pkl)
+        decoder.model = model
+
+    if decoder.preprocessor is None:
+        if options.prepr_yaml is None:
+            log.warning("Preprocessor is empty, feats will be fed into the model"
+                     " as provided from the pipe or as read from archive.")
+            preprocessor = None
+        else:
+            preprocessor = serial.load_train_file(options.prepr_yaml)
+        decoder.preprocessor = preprocessor
+
+    if (options.model_pytables is not None) or \
+       (options.model_pytables_sd is not None):
+        params = load_model_params_from_pytables(options.model_pytables,
+                                                 options.model_pytables_sd)
+        #TODO: add cross-check if parameters keys match 1:1 with the model
         decoder.set_model_params(params)
 
-    return decoder
+    log_priors = None
+    if options.priors_path is not None:
+        log_priors = load_kaldi_priors(options.priors_path)
 
-def load_kaldi_priors(path):
-    numbers=numpy.fromregex(path, r"(\d+)", dtype=[('num', numpy.int32)])
-    class_counts=numpy.asarray(numbers['num'], dtype=theano.config.floatX)
-    priors = class_counts/class_counts.sum()
-    #floor zeroes to something small so log() on that will be different from -inf or better skip these in contribution at all i.e. set to -log(0)?
-    priors[priors<1e-10] = 1e-10 
-    assert numpy.all(priors > 0) and numpy.all(priors <= 1.0)
-    log_priors = numpy.log(priors)
-    assert not numpy.any(numpy.isinf(log_priors))
-    return log_priors
+    decoder.build_fwdprop_function(log_priors)
 
-def init_environment(yaml_path, pytable_path, pkl_path='', priors_path=''):
-
-    decoder = load_decoder_provider(yaml_path, pytable_path, pkl_path)
-    
-    priors, log_priors = None, None
-    if priors_path!='':
-        priors = load_kaldi_priors(priors_path)
-        log_priors = sharedX(priors, name='log_priors')
-    
-    z = T.matrix('outputs')
-    lp = T.vector('lp')
-        
-    X = decoder.model.get_input_space().make_batch_theano()
-    X.name = 'X'
-    y = decoder.model.fprop(X)
-    y.name = 'y'
-        
-    z = T.log(y)
-    
-    if log_priors != None:
-        z = z - lp
-        fprop = function(inputs = [X], 
-                         outputs = z, 
-                         givens = {lp: log_priors})
-    else:
-        fprop = function([X], z)
-    
-    decoder.fprop = fprop
+    assert isinstance(decoder, Pylearn2KaldiDecoderProvider)
+    assert isinstance(decoder.model, Model)
+    assert isinstance(decoder.preprocessor, OnlinePreprocessor) or decoder.preprocessor is None
+    assert decoder.fprop is not None
 
     return decoder
 
-def main_loop(buffer, decoder, debug=False):
+def decoder_loop(buffer, decoder, debug=False):
     
     #Changing batch_size on the fly do not work with ConvOp for some reason
     #this function splits the data into original batch sizes and padds the last minbatch 
@@ -141,9 +189,10 @@ def main_loop(buffer, decoder, debug=False):
         assert activations.shape[0] == pfeats.shape[0]
         
         if debug:
-            print feats.shape
-            print pfeats.shape
-            print activations.shape
+            print "UTTID: %s\n"%uttid
+            print "Original (piped) features are of shape: ", feats.shape
+            print "Pre-processed features are of shape: ", pfeats.shape
+            print "Predictions are of shape: ", activations.shape
             print activations
         else:
             f=tempfile.SpooledTemporaryFile(max_size=209715200) #keep up to 200MB in memory
@@ -155,38 +204,37 @@ def main_loop(buffer, decoder, debug=False):
 
 def main(args=None):
 
-    parser = OptionParser()
+    parser = ArgumentParser()
 
-    parser.add_option("--model-pkl", dest="model_pkl", default="",
-                      help="specify the model pickle to be used in forward pass")
-    parser.add_option("--model-yaml", dest="model_yaml", default="",
-                      help="specify the model yaml structure to be used in forward pass")
-    parser.add_option("--model-pytables", dest="model_pytables", default="",
-                      help="specify the pytable file from which weights should be loaded")
-    parser.add_option("-t", "--feats-flist", dest="feats_flist", default="",
-                      help="specify a feats scp to fwd pass (if not specified, pipe assumed)")
-    parser.add_option("-p", "--priors", dest="priors_path", default="",
-                      help="specify the priors to obtain scaled-likelihoods")
-    parser.add_option("--debug", dest="debug", default=False,
-                      help="Prints activations and shapes in text format rather than binary Kaldi archives")
+    parser.add_argument("--decoder-yaml", dest="decoder_yaml", default=None,
+                        help="specify the decoder yaml structure (including seed model) to start with")
+    parser.add_argument("--model-pkl", dest="model_pkl", default=None,
+                        help="specify the model pickle to be used in forward pass")
+    parser.add_argument("--model-pytables", dest="model_pytables", default=None,
+                        help="specify the pytable file from which weights should be loaded")
+    parser.add_argument("--model-pytables-sd", dest="model_pytables_sd", default=None,
+                        help="specify the pytable file with speaker dependent parameters."
+                           "Note, in case the parameters overlap with --model-pytables"
+                           "the si will be over-ridden by sd.")
+    parser.add_argument("--prepr-yaml", dest="prepr_yaml", default=None,
+                        help="Yaml describing feature pipline preprocessors.")
+    parser.add_argument("--feats-flist", dest="feats_flist", default=None,
+                        help="specify a feats scp to fwd pass (if not specified, Kaldi pipe assumed)")
+    parser.add_argument("--priors", dest="priors_path", default=None,
+                        help="specify the priors to obtain scaled-likelihoods")
+    parser.add_argument("--debug", dest="debug", default=False,
+                        help="Prints activations and shapes in text format rather than binary Kaldi archives")
     
-    (options,args) = parser.parse_args(args=args)
+    options = parser.parse_args()
 
-    buffer = sys.stdin
-    
-    if (options.model_pkl!=''):
-        decoder = init_environment(options.model_yaml, options.model_pytables, options.model_pkl, options.priors_path)
-    elif (options.model_pytables!='' and options.model_yaml!=''):    
-        decoder = init_environment(options.model_yaml, options.model_pytables, options.model_pkl, options.priors_path)
-    else:
-         NotImplementedError('Cannot load the model')
-    
     debug = False
     if options.debug=='True':
         debug = True
-    
-    #TODO: load it from yaml file
-    main_loop(buffer, decoder, debug=debug)
+
+    decoder = prepare_decoding_pipeline(options)
+    buffer = sys.stdin
+
+    decoder_loop(buffer, decoder, debug=debug)
 
 if __name__=='__main__':
     main()
