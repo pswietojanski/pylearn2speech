@@ -94,12 +94,14 @@ def prepare_decoder(decoder_yaml_filepath):
         decoder = Pylearn2KaldiDecoderProvider(model=None, preprocessor=None)
     return decoder
 
-def load_model_params_from_pytables(model_pytables_filepath, model_pytables_sd_filepath):
+def load_model_params_from_pytables(model_pytables_filepath,
+                                    model_pytables_sd_filepath):
 
     params = {}
     #load general parameters (speaker independent)
     if model_pytables_filepath is not None:
-        params = serial.load_params_from_pytables(model_pytables_filepath, container_name="Model")
+        params = serial.load_params_from_pytables(model_pytables_filepath,
+                                                  container_name="Model")
     #and possibly load also speaker dependent ones, which override the
     #speaker independent ones when the names are the same
     if model_pytables_sd_filepath is not None:
@@ -107,8 +109,10 @@ def load_model_params_from_pytables(model_pytables_filepath, model_pytables_sd_f
         for sd_key in params_sd.keys():
             if sd_key in params.keys():
                 log.warning("Key %s appears in both containers %s and %s."
-                            "The latter will override the former in the final model"
-                            %(sd_key, model_pytables_filepath, model_pytables_sd_filepath))
+                            "Seaker-dependent ones will override "
+                            "speaker-independent in the final model"
+                            %(sd_key, model_pytables_filepath,
+                              model_pytables_sd_filepath))
             params[sd_key] = params_sd[sd_key]
 
     return params
