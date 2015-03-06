@@ -315,10 +315,7 @@ class MLP(Layer):
                 if param not in rval:
                     rval.append(param)
 
-        #print 'MLP freeze set', self.freeze_set
-        #print 'MLP params original', rval
         rval = [elem for elem in rval if elem not in self.freeze_set]
-        #print 'MLP params new', rval
 
         assert all([elem.name is not None for elem in rval])
 
@@ -331,7 +328,11 @@ class MLP(Layer):
                     warnings.warn('Parameter %s not found in %s. Will use initial parameters.'%(param.name, params_dict.keys()))
                     continue
                     #raise Exception('Parameter %s not found in %s'%(param.name, str(params_dict)))
-                assert param.get_value().shape == params_dict[param.name].shape
+                assert param.get_value().shape == params_dict[param.name].shape, (
+                    "Parameter " + str(param.name) + " was created with shape " + \
+                    + str(param.get_value().shape) + \
+                    " so cannot set values with shape " + str(params_dict[param.name].shape)
+                )
                 param.set_value(params_dict[param.name], borrow=False)
                 #print 'Swapping %s'%param.name
 
@@ -707,7 +708,7 @@ class MLP(Layer):
 class Softmax(Layer):
 
     def __init__(self, n_classes, layer_name, irange = None,
-            istdev = None,
+                 istdev = None,
                  sparse_init = None, W_lr_scale = None,
                  b_lr_scale = None, max_row_norm = None,
                  no_affine = False,
@@ -1256,6 +1257,334 @@ class SoftmaxPool(Layer):
         p.name = self.layer_name + '_p_'
 
         return p
+
+class CICDSoftmax(Layer):
+    """
+    A context-dependent-independent softmax layer
+    """
+    def __init__(self, cd_n_classes, m_n_classes, layer_name,
+                 irange = None,  istdev = None,
+                 sparse_init = None,
+                 W_lr_scale = None,
+                 C_lr_scale = None,
+                 M_lr_scale = None,
+                 b_lr_scale = None,
+                 m_lr_scale = None,
+                 max_row_norm = None,
+                 max_col_norm = None,
+                 M_max_row_norm = None,
+                 M_max_col_norm = None,
+                 C_max_row_norm = None,
+                 C_max_col_norm = None,
+                 m_cost_scaler = 0.5,
+                 prediction_mode = False):
+        """
+        """
+
+        if isinstance(W_lr_scale, str):
+            W_lr_scale = float(W_lr_scale)
+
+        if isinstance(C_lr_scale, str):
+            C_lr_scale = float(C_lr_scale)
+
+        if isinstance(M_lr_scale, str):
+            M_lr_scale = float(M_lr_scale)
+
+        self.__dict__.update(locals())
+        del self.self
+
+        assert isinstance(cd_n_classes, py_integer_types)
+        assert isinstance(m_n_classes, py_integer_types)
+
+        self.output_space = VectorSpace(cd_n_classes)
+
+    def get_lr_scalers(self):
+
+        rval = OrderedDict()
+
+        if self.W_lr_scale is not None:
+            assert isinstance(self.W_lr_scale, float)
+            rval[self.W] = self.W_lr_scale
+
+        if self.M_lr_scale is not None:
+            assert isinstance(self.M_lr_scale, float)
+            rval[self.M] = self.M_lr_scale
+
+        if self.C_lr_scale is not None:
+            assert isinstance(self.C_lr_scale, float)
+            rval[self.C] = self.C_lr_scale
+
+        if not hasattr(self, 'b_lr_scale'):
+            self.b_lr_scale = None
+
+        if self.b_lr_scale is not None:
+            assert isinstance(self.b_lr_scale, float)
+            rval[self.b] = self.b_lr_scale
+
+        if not hasattr(self, 'm_lr_scale'):
+            self.m_lr_scale = None
+
+        if self.b_lr_scale is not None:
+            assert isinstance(self.m_lr_scale, float)
+            rval[self.m] = self.m_lr_scale
+
+        return rval
+
+    def get_monitoring_channels(self):
+
+        W = self.W
+        assert W.ndim == 2
+        sq_W = T.sqr(W)
+        row_norms = T.sqrt(sq_W.sum(axis=1))
+        col_norms = T.sqrt(sq_W.sum(axis=0))
+
+        M = self.M
+        assert M.ndim == 2
+        sq_M = T.sqr(M)
+        M_row_norms = T.sqrt(sq_M.sum(axis=1))
+        M_col_norms = T.sqrt(sq_M.sum(axis=0))
+
+        C = self.C
+        assert W.ndim == 2
+        sq_C = T.sqr(C)
+        C_row_norms = T.sqrt(sq_C.sum(axis=1))
+        C_col_norms = T.sqrt(sq_C.sum(axis=0))
+
+        return OrderedDict([
+                            ('row_norms_min'  , row_norms.min()),
+                            ('row_norms_mean' , row_norms.mean()),
+                            ('row_norms_max'  , row_norms.max()),
+                            ('col_norms_min'  , col_norms.min()),
+                            ('col_norms_mean' , col_norms.mean()),
+                            ('col_norms_max'  , col_norms.max()),
+                            ('M_row_norms_min'  , M_row_norms.min()),
+                            ('M_row_norms_mean' , M_row_norms.mean()),
+                            ('M_row_norms_max'  , M_row_norms.max()),
+                            ('M_col_norms_min'  , M_col_norms.min()),
+                            ('M_col_norms_mean' , M_col_norms.mean()),
+                            ('M_col_norms_max'  , M_col_norms.max()),
+                            ('C_row_norms_min'  , C_row_norms.min()),
+                            ('C_row_norms_mean' , C_row_norms.mean()),
+                            ('C_row_norms_max'  , C_row_norms.max()),
+                            ('C_col_norms_min'  , C_col_norms.min()),
+                            ('C_col_norms_mean' , C_col_norms.mean()),
+                            ('C_col_norms_max'  , C_col_norms.max()),
+                            ])
+
+    def get_monitoring_channels_from_state(self, state, target=None):
+
+        mx = state.max(axis=1)
+
+        rval =  OrderedDict([
+                ('mean_max_class' , mx.mean()),
+                ('max_max_class' , mx.max()),
+                ('min_max_class' , mx.min())
+        ])
+
+        if target is not None:
+            y_hat = T.argmax(state, axis=1)
+            y = T.argmax(target, axis=1)
+            misclass = T.neq(y, y_hat).mean()
+            misclass = T.cast(misclass, config.floatX)
+            rval['misclass'] = misclass
+            rval['nll'] = self.cost(Y_hat=state, Y=target)
+
+        return rval
+
+    def set_input_space(self, space):
+        self.input_space = space
+
+        if not isinstance(space, Space):
+            raise TypeError("Expected Space, got "+
+                    str(space)+" of type "+str(type(space)))
+
+        self.input_dim = space.get_total_dimension()
+        self.needs_reformat = not isinstance(space, VectorSpace)
+
+        self.desired_space = VectorSpace(self.input_dim)
+
+        if not self.needs_reformat:
+            assert self.desired_space == self.input_space
+
+        rng = self.mlp.rng
+
+        if self.irange is not None:
+            assert self.istdev is None
+            assert self.sparse_init is None
+            W = rng.uniform(-self.irange,self.irange, (self.input_dim, self.cd_n_classes))
+            M = rng.uniform(-self.irange,self.irange, (self.input_dim, self.m_n_classes))
+            C = rng.uniform(-self.irange,self.irange, (self.m_n_classes, self.cd_n_classes))
+        elif self.istdev is not None:
+            assert self.sparse_init is None
+            W = rng.randn(self.input_dim, self.n_classes) * self.istdev
+        else:
+            assert self.sparse_init is not None
+            W = np.zeros((self.input_dim, self.n_classes))
+            for i in xrange(self.n_classes):
+                for j in xrange(self.sparse_init):
+                    idx = rng.randint(0, self.input_dim)
+                    while W[idx, i] != 0.:
+                        idx = rng.randint(0, self.input_dim)
+                    W[idx, i] = rng.randn()
+
+        self.W = sharedX(W,  'softmax_W' )
+        self.C = sharedX(C,  'softmax_C' )
+        self.M = sharedX(M,  'softmax_M' )
+
+        self.b = sharedX(np.zeros((self.cd_n_classes,), "softmax_b"))
+        self.m = sharedX(np.zeros((self.m_n_classes,), "softmax_m"))
+
+        self._params = [ self.b, self.W, self.M, self.C ]
+
+    def get_weights_topo(self):
+        if not isinstance(self.input_space, Conv2DSpace):
+            raise NotImplementedError()
+        desired = self.W.get_value().T
+        ipt = self.desired_space.format_as(desired, self.input_space)
+        rval = Conv2DSpace.convert_numpy(ipt, self.input_space.axes, ('b', 0, 1, 'c'))
+        return rval
+
+    def get_weights(self):
+        if not isinstance(self.input_space, VectorSpace):
+            raise NotImplementedError()
+
+        return self.W.get_value()
+
+    def set_weights(self, weights):
+        self.W.set_value(weights)
+
+    def set_biases(self, biases):
+        self.b.set_value(biases)
+
+    def get_biases(self):
+        return self.b.get_value()
+
+    def get_weights_format(self):
+        return ('v', 'h')
+
+    def fprop(self, state_below):
+
+        self.input_space.validate(state_below)
+
+        if self.needs_reformat:
+            state_below = self.input_space.format_as(state_below, self.desired_space)
+
+        for value in get_debug_values(state_below):
+            if self.mlp.batch_size is not None and value.shape[0] != self.mlp.batch_size:
+                raise ValueError("state_below should have batch size "+str(self.dbm.batch_size)+" but has "+str(value.shape[0]))
+
+        self.desired_space.validate(state_below)
+        assert state_below.ndim == 2
+
+        assert self.W.ndim == 2
+        assert self.M.ndim == 2
+        assert self.C.ndim == 2
+
+        b = self.b
+        m = self.m
+
+        M = T.dot(state_below, self.M) + m
+        Z = T.dot(state_below, self.W) + T.dot(M, self.C) + b
+
+        rval_m = T.nnet.softmax(M)
+        rval_cd = T.nnet.softmax(Z)
+
+        if self.prediction_mode:
+            return rval_cd
+        else:
+            return (rval_cd, rval_m)
+
+    def cost(self, Y, Y_hat):
+        """
+        Y must be one-hot binary. Y_hat is a softmax estimate.
+        of Y. Returns negative log probability of Y under the Y_hat
+        distribution.
+        """
+
+        assert self.prediction_mode is False, (
+            "You need to set prediction_mode to false for training"
+        )
+
+        Y_cd, Y_m = Y
+        Y_hat_cd, Y_hat_m = Y_hat
+
+        assert hasattr(Y_hat_cd, 'owner')
+        assert hasattr(Y_hat_m, 'owner')
+
+        #get inputs for cd task
+        cd_owner = Y_hat_cd.owner
+        assert cd_owner is not None
+        cd_op = cd_owner.op
+        if isinstance(cd_op, Print):
+            assert len(cd_owner.inputs) == 1
+            Y_hat_cd, = cd_owner.inputs
+            cd_owner = Y_hat_cd.owner
+            cd_op = cd_owner.op
+        assert isinstance(cd_op, T.nnet.Softmax)
+        cd_z ,= cd_owner.inputs
+        assert cd_z.ndim == 2
+
+        m_owner = Y_hat_m.owner
+        assert m_owner is not None
+        m_op = m_owner.op
+        if isinstance(m_op, Print):
+            assert len(m_owner.inputs) == 1
+            Y_hat_m, = m_owner.inputs
+            m_owner = Y_hat_m.owner
+            m_op = m_owner.op
+        assert isinstance(m_op, T.nnet.Softmax)
+        m_z ,= m_owner.inputs
+        assert m_z.ndim == 2
+
+        cd_z = cd_z - cd_z.max(axis=1).dimshuffle(0, 'x')
+        log_prob_cd = cd_z - T.log(T.exp(cd_z).sum(axis=1).dimshuffle(0, 'x'))
+        # we use sum and not mean because this is really one variable per row
+        log_prob_of_cd = (Y_cd * log_prob_cd).sum(axis=1)
+        assert log_prob_of_cd.ndim == 1
+
+        rval_cd = log_prob_of_cd.mean()
+
+        m_z = m_z - m_z.max(axis=1).dimshuffle(0, 'x')
+        log_prob_m = m_z - T.log(T.exp(m_z).sum(axis=1).dimshuffle(0, 'x'))
+        # we use sum and not mean because this is really one variable per row
+        log_prob_of_m = (Y_m * log_prob_m).sum(axis=1)
+        assert log_prob_of_m.ndim == 1
+
+        rval_m = log_prob_of_m.mean()
+
+        rval = (1-self.m_cost_scaler)*rval_cd + self.m_cost_scaler*rval_m
+
+        return - rval
+
+    def get_weight_decay(self, coeff):
+        if isinstance(coeff, str):
+            coeff = float(coeff)
+        assert isinstance(coeff, float) or hasattr(coeff, 'dtype')
+        return coeff * T.sqr(self.W).sum()
+
+    def get_l1_weight_decay(self, coeff):
+        if isinstance(coeff, str):
+            coeff = float(coeff)
+        assert isinstance(coeff, float) or hasattr(coeff, 'dtype')
+        W = self.W
+        return coeff * abs(W).sum()
+
+    def censor_updates(self, updates):
+        if self.max_row_norm is not None:
+            W = self.W
+            if W in updates:
+                updated_W = updates[W]
+                row_norms = T.sqrt(T.sum(T.sqr(updated_W), axis=1))
+                desired_norms = T.clip(row_norms, 0, self.max_row_norm)
+                updates[W] = updated_W * (desired_norms / (1e-7 + row_norms)).dimshuffle(0, 'x')
+        if self.max_col_norm is not None:
+            assert self.max_row_norm is None
+            W = self.W
+            if W in updates:
+                updated_W = updates[W]
+                col_norms = T.sqrt(T.sum(T.sqr(updated_W), axis=0))
+                desired_norms = T.clip(col_norms, 0, self.max_col_norm)
+                updates[W] = updated_W * (desired_norms / (1e-7 + col_norms))
 
 class Linear(Layer):
     """

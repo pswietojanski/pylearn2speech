@@ -7,17 +7,12 @@ __maintainer__ = "Pawel Swietojanski"
 __email__ = "p.swietojanski@ed.ac.uk"
 
 import functools
-
 import warnings
 import numpy as np
-from theano import config
 
+from theano import config
 from pylearn2.datasets.dataset import Dataset
-from pylearn2.datasets import control
-from pylearn2.space import CompositeSpace, Conv2DSpace, VectorSpace
 from pylearn2.datasets.speech_utils.kaldi_providers import KaldiAlignFeatsProviderUtt, KaldiFeatsProviderUtt, MultiStreamKaldiAlignFeatsProviderUtt
-#from pylearn2.datasets.speech_utils.htk_providers import HTKAlignFeatsProviderUtt, HTKFeatsProviderUtt
-#from pylearn2.datasets.speech_utils.providers import BufferedProvider
 from pylearn2.datasets.speech_utils.cache import Pylearn2CacheSimple
 from pylearn2.utils.iteration import QueuedDatasetIterator
 
@@ -48,8 +43,8 @@ def get_kaldi_provider(flist, aligns, template_call=None, shuffle_flists=True, s
 class SpeechDataset(Dataset):
     """WRITEME:
     1) X and y keeps only portion of the whole dataset (many speech datasets are impossible to fit into (GPU) memory at once)
-    2) The iterator communicate through queues only
-    3) [Optional] preprocessor acts online, per portion-basis
+    2) The iterator communicates through queues only
+    3) [Optional] preprocessor acts online, per mini-batch
     """
     def __init__(self, flist, 
                        aligns=None,
@@ -218,4 +213,3 @@ class SpeechDataset(Dataset):
     
     def queue(self):
         return self._queue
-    

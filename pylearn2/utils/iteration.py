@@ -18,6 +18,7 @@ Presets:
 from __future__ import division
 import warnings
 import numpy
+import logging
 np = numpy
 from theano import config
 from Queue import Empty as QueueEmptyException
@@ -26,6 +27,8 @@ from pylearn2.space import CompositeSpace
 from pylearn2.utils import safe_zip
 from pylearn2.utils.data_specs import is_flat_specs
 from pylearn2.datasets.speech_utils.cache import QueueCacheLastElem
+
+log = logging.getLogger(__name__)
 
 class SubsetIterator(object):
     def __init__(self, dataset_size, batch_size, num_batches, rng=None):
@@ -504,7 +507,9 @@ class QueuedDatasetIterator(object):
         
         self._num_batches = int(dataset_size/batch_size)
         self._batch_size = batch_size
-        self._num_examples = self._num_batches*self._batch_size 
+        self._num_examples = self._num_batches*self._batch_size
+        self._num_examples_from_queue = 0
+        self._num_batches_from_queue = 0
                 
     @property
     def batch_size(self):
@@ -512,10 +517,22 @@ class QueuedDatasetIterator(object):
 
     @property
     def num_batches(self):
+        #if self._num_batches_from_queue != self._num_batches:
+        #    log.warning("The number of batches returned by the queue is different"
+        #                "than (pre) specified by dataset_size given batch size. "
+        #                "This can happen when some examples were filtered out during preprocessing."
+        #                "Returning the actual number of batches so the training proceeds.")
+        #    return self._num_batches_from_queue
         return self._num_batches
 
     @property
     def num_examples(self):
+        #if self._num_examples_from_queue != self._num_examples:
+        #    log.warning("The number of elements read from the queue is different"
+        #                "than (pre) specified in dataset_size. This can happens"
+        #                "when some examples were filtered out during preprocessing."
+        #                "Returning the actual seen examples so the training proceeds.")
+        #    return self._num_examples_from_queue
         return self._num_examples
 
     @property
@@ -535,6 +552,10 @@ class QueuedDatasetIterator(object):
             raise StopIteration
         if not self._return_tuple and len(rval) == 1:
             rval, = rval
+
+        self._num_examples_from_queue += rval[0].shape[0]
+        self._num_examples_from_queue += 1
+
         return rval
     
     def __pop_from_queue(self, queue):

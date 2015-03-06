@@ -1985,8 +1985,8 @@ class MultiplicativeAdapter(Layer):
         
         z = state_below
         amp = 2*T.nnet.sigmoid(self.u)
-
         a = z*amp
+
         a.name = "_a_"
         
         return a

@@ -1,6 +1,9 @@
 
-import random, time, thread, sys 
-import numpy as np
+import random
+import time
+import thread
+import sys
+import numpy
 
 from Queue import Empty as QueueEmptyException
 from Queue import Full as QueueFullException 
@@ -42,23 +45,14 @@ class Pylearn2Cache(PYLEARN2_LOADING_MODE):
     @staticmethod
     def make_queue(maxsize=5):
         return Queue(maxsize=maxsize)
-    
-#    @staticmethod
-#    def pop_from_queue(queue):
-#        while True:
-#            try:
-#                result = queue.get(True, 5)
-#                return result
-#            except QueueEmptyException:
-#                continue
-        
+
 class Pylearn2CacheSimple(Pylearn2Cache):
 
-    def __init__(self, queue, provider, batch_size, num_classes, preprocessor=None):
+    def __init__(self, queue, provider, batch_size, num_classes, preprocessor=None, frame_shuffling_window=None):
         super(Pylearn2CacheSimple, self).__init__(queue, provider, batch_size, num_classes, preprocessor)
         self.provider = BufferedProvider(provider, batch_size)
+        self.frame_shuffling_window = frame_shuffling_window
         self.lfreq=2**20 #print progress/efficiency stats after 1M examples
-        #self.provider.reset()
         
     def run(self): 
         tstart = time.time()    
@@ -72,6 +66,7 @@ class Pylearn2CacheSimple(Pylearn2Cache):
             data = X
             if self.preprocessor != None:
                 data = self.preprocessor.apply(data)
+
             y = self.convert_to_one_hot(y, 0)
             rval = (data, y)
             
@@ -92,6 +87,15 @@ class Pylearn2CacheSimple(Pylearn2Cache):
         self.queue.put(QueueCacheLastElem(), block=True) #all data has been loaded
         print 'Pylearn2CacheSimple : Consuming the entire set %i examples took %f minutes which gives ca. %f pres/second.'%(texamples, ttime/60., texamples/ttime)
 
+    def frame_shuffler(self, (data, y)):
+        assert len(data) == len(y)
+        rng_state = numpy.random.get_state()
+        numpy.random.shuffle(data)
+        numpy.random.set_state(rng_state)
+        numpy.random.shuffle(y)
+
+        return (data, y)
+
     def convert_to_one_hot(self, y, min_class=0):
         
         if y.ndim != 1:
@@ -101,7 +105,7 @@ class Pylearn2CacheSimple(Pylearn2Cache):
             raise ValueError("Called convert_to_one_hot on a DenseDesignMatrix whose labels aren't integer-valued.")
 
         y = y - min_class
-        yr = np.zeros((y.shape[0], self.num_classes), dtype=np.float32)
+        yr = numpy.zeros((y.shape[0], self.num_classes), dtype=numpy.float32)
 
         for i in xrange(y.shape[0]):
             yr[i, y[i]] = 1

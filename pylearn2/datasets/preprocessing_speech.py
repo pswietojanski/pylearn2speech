@@ -98,7 +98,12 @@ class ReshapeAudioChannels(OnlinePreprocessor):
 
 class SpliceFrames(OnlinePreprocessor):
     def __init__(self, left_context=4, right_context=4, add_paddings=True):
-        
+        """
+        :param left_context: number of frames on the left from central one
+        :param right_context: number of frames on the right from cetral one
+        :param add_paddings: pad (replicate) frames at the beginning *_contex times
+        :return: nparrray with spliced frames around central frame
+        """
         self._left_context = left_context
         self._right_context = right_context
         self._add_paddings = add_paddings
@@ -135,7 +140,9 @@ class SpliceFrames(OnlinePreprocessor):
         
     def __splice_single_channel(self, x):
         
-        assert len(x.shape)==2
+        assert len(x.shape)==2, (
+            "Frame splicing implemented only for 2D matrices."
+        )
         
         num_examples, dim = x.shape
         ctx_win = numpy.arange((self._left_context+self._right_context+1) * dim)
@@ -150,6 +157,27 @@ class SpliceFrames(OnlinePreprocessor):
     
         return numpy.asarray(inputs[indexes], dtype=numpy.float32)
 
+class FilterFrames(OnlinePreprocessor):
+    """The preprocessor allows to remove or limit certain classes
+    from training, i.e. limit the number of silence frames in adaptation
+    """
+    def __init__(self, exclude_list=[], ratio=1.0):
+        """
+        exclude_list: id of classess one want to remove from minibatches
+        ratio: remove 1/ratio datapoints describing certain classes from training
+        """
+        self.exclude_list = exclude_list
+        self.ratio = ratio
+
+        if self.ratio < 1.0:
+            self.ratio = 1.0
+
+    def apply(self, xy):
+        x,y = xy
+        if len(self.exclude_list) == 0:
+            return xy;
+
+        v, idx = find(y)
 
 class ReorderByBands(OnlinePreprocessor):
     """
@@ -303,3 +331,4 @@ class SpliceChannels(OnlinePreprocessor):
     
     def apply(self, x):
         pass
+

@@ -187,3 +187,78 @@ class BufferedProvider(object):
         except StopIteration:
             raise StopIteration
 
+
+class RandomizedBufferedProvider(object):
+    def __init__(self, provider, batch_size, shuffling_window=2**15):
+        self.provider = provider
+        self.batch_size = batch_size
+        self.shuffling_window = shuffling_window
+        self.feats_buf = []
+        self.labs_buf = []
+        self.max_buf_elems = 20
+        self.feats_tail=None
+        self.labs_tail=None
+        self.finished=False
+
+        self.provider.reset()
+
+    def reset(self):
+        self.provider.reset()
+        self.finished = False
+
+    @property
+    def num_classes(self):
+        return self.provider.num_classes
+
+    def __iter__(self):
+        return self
+
+    def next(self):
+        try:
+            if (len(self.feats_buf)<1):
+
+                if self.finished: raise StopIteration
+
+                tmp_feats_list, tmp_labs_list = [], []
+                num_frames_read=0
+
+                if self.feats_tail != None and self.labs_tail != None:
+                    tmp_feats_list.append(self.feats_tail)
+                    tmp_labs_list.append(self.labs_tail)
+                    num_frames_read = self.feats_tail.shape[0]
+                    self.feats_tail, self.labs_tail = None, None
+
+                try:
+                    while num_frames_read < self.max_buf_elems*self.batch_size:
+                        result, utt = self.provider.next()
+                        if (result[0] is None) or (result[1] is None):
+                            #print 'BufferedProvider: skipping %s'%utt
+                            continue
+                        num_frames_read += result[0].shape[0]
+                        tmp_feats_list.append(result[0])
+                        tmp_labs_list.append(result[1])
+                except StopIteration:
+                    self.finished = True
+
+                if self.finished and num_frames_read<self.batch_size:
+                    raise StopIteration
+
+                feats = numpy.concatenate(tmp_feats_list)
+                labs = numpy.concatenate(tmp_labs_list)
+
+                assert feats.shape[0] == labs.shape[0]
+
+                indexes = numpy.arange(self.batch_size, feats.shape[0], self.batch_size)
+                self.feats_buf=numpy.split(feats, indexes)
+                self.labs_buf=numpy.split(labs, indexes)
+
+                if self.feats_buf[-1].shape[0]!=self.batch_size:
+                    self.feats_tail = self.feats_buf.pop()
+                    self.labs_tail = self.labs_buf.pop()
+
+            feats = self.feats_buf.pop()
+            labs = self.labs_buf.pop()
+            return (feats, labs)
+
+        except StopIteration:
+            raise StopIteration

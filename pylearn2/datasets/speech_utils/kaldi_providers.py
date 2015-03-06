@@ -6,7 +6,9 @@ __license__ = "3-clause BSD"
 __maintainer__ = "Pawel Swietojanski"
 __email__ = "p.swietojanski@ed.ac.uk"
 
-import numpy, struct, random, string, time
+import numpy
+import struct
+import random
 
 from multiprocessing import Process, Queue, Pool
 
