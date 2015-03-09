@@ -1901,6 +1901,7 @@ class MultiplicativeAdapter(Layer):
     def __init__(self, layer_name,
                        irange = None,
                        u_lr_scale = None,
+                       constraint = 'sigmoid',
                        decoding = False):
         """
             layer_name: a layer name that will be
@@ -1911,6 +1912,8 @@ class MultiplicativeAdapter(Layer):
             decoding: once the model is trained, u is fixed as such there is
                     no need to evaluate simgoid(u) for each example
         """
+
+        assert constraint in ['sigmoid', 'exp', 'relu', 'none']
 
         self.__dict__.update(locals())
         del self.self
@@ -1953,7 +1956,11 @@ class MultiplicativeAdapter(Layer):
             u = np.random.uniform(-self.irange, +self.iragne,
                                     (self.input_dim,), dtype=config.floatX)
         else:
-            u = np.zeros((self.input_dim,), dtype=config.floatX)
+            if self.constraint in ['sigmoid', 'exp']:
+                offset = 0.0
+            else:
+                offset = 1.0
+            u = np.zeros((self.input_dim,), dtype=config.floatX) + offset
             
         self.u = sharedX(u, name=self.layer_name+'_u')
 
@@ -1984,7 +1991,15 @@ class MultiplicativeAdapter(Layer):
         self.output_space.validate(state_below)
         
         z = state_below
-        amp = 2*T.nnet.sigmoid(self.u)
+        if self.constraint == "sigmoid":
+            amp = 2*T.nnet.sigmoid(self.u)
+        elif self.constraint == "exp":
+            amp = T.exp(self.u)
+        elif self.constraint == "relu":
+            amp = T.maximum(0.0, self.relu)
+        else:
+            amp = self.u
+
         a = z*amp
 
         a.name = "_a_"
