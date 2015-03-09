@@ -223,12 +223,12 @@ class Monitor(object):
                     # X is a flat (not nested) tuple
                     self.run_prereqs(X, d)
                     a(*X)
-                    actual_ne += self._flat_data_specs[0].np_batch_size(X)
-                # end for X
-                if actual_ne != ne:
-                    log.warning("At compile time, your iterator said "
-                            "it had " + str(ne) + " examples total, but at "
-                            "runtime it gave us " + str(actual_ne) + ".")
+                    #actual_ne += self._flat_data_specs[0].np_batch_size(X)
+                # end for Xq
+                #if actual_ne != ne:
+                #    log.warning("At compile time, your iterator said "
+                #            "it had " + str(ne) + " examples total, but at "
+                #            "runtime it gave us " + str(actual_ne) + ".")
                     #raise RuntimeError("At compile time, your iterator said "
                     #        "it had " + str(ne) + " examples total, but at "
                     #        "runtime it gave us " + str(actual_ne) + ".")

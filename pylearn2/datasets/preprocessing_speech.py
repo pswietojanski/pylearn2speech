@@ -9,44 +9,20 @@ import numpy, theano
 class OnlinePreprocessor():
     def __init__(self):
         pass
-    def apply(self, x):
-        return x
+    def apply(self, xy):
+        return xy
     
 class PipelineOnlinePreprocessor(OnlinePreprocessor):
     def __init__(self, items):
         self.items = items if items is not None else []
         
-    def apply(self, x):
+    def apply(self, xy):
         #Note x could be a numpy array or a list of a numpy arrays
         #In the latter case each element from the list is preprocessed by the pipeline independently using the same preprocessors
-        rval = x
-        if isinstance(rval, list):
-            
-            raise NotImplementedError('PipelineOnlinePreprocessor: Having a list as input not implemented. If using MultiStreamKaldiAlignFeatsProvider use concatenated mode instead')
-        
-            print 'List mode'
-            rvals = []
-            for i in xrange(len(rval)):
-                xx = rval[i]
-                for item in self.items:
-                    xx = item.apply(xx)
-                rvals.append(xx)
-                
-            #its hardcoded for ICASSP, make it configurable, possibly add another preprocessor
-            channels = len(rvals)
-            assert channels > 0
-            
-            ch1_shape = rvals[0].shape
-            assert ch1_shape[1]==1 #when having multiple channels deltas have to stay with statics
-            for c in xrange(1, channels):
-                assert ch1_shape == rvals[c].shape 
-                
-            rval = numpy.zeros(ch1_shape[0], channels, ch1_shape[2], ch1_shape[3])
-            for c in xrange(channels):
-                rval[:,c,:,:] = rvals[i] 
-        else:
-            for item in self.items:
-                rval = item.apply(rval)
+
+        rval = xy
+        for item in self.items:
+            rval = item.apply(rval)
         return rval
 
 class CMVNNormaliser(OnlinePreprocessor):
@@ -59,11 +35,12 @@ class CMVNNormaliser(OnlinePreprocessor):
         
         assert var_floor > 0 and self.stdev > var_floor
         
-    def apply(self, x):
+    def apply(self, xy):
+        x, y = xy
         rval=(x-self.mean)
         if self.norm_vars:
             rval /= self.stdev
-        return rval
+        return (rval, y)
 
 class ReshapeAudioChannels(OnlinePreprocessor):
     """
@@ -76,10 +53,12 @@ class ReshapeAudioChannels(OnlinePreprocessor):
         self._num_input_channels = num_input_channels
         assert self._num_input_channels >= 1
         
-    def apply(self, x):
-                
+    def apply(self, xy):
+
+        x, y = xy
+
         if self._num_input_channels == 1:
-            return x
+            return (x, y)
 
         #print 'ReshapeAudioChannels x shape', x.shape
 
@@ -94,7 +73,7 @@ class ReshapeAudioChannels(OnlinePreprocessor):
         
         #print 'ReshapeAudioChannels rval shape', rval.shape
         
-        return rval
+        return (rval, y)
 
 class SpliceFrames(OnlinePreprocessor):
     def __init__(self, left_context=4, right_context=4, add_paddings=True):
@@ -110,13 +89,15 @@ class SpliceFrames(OnlinePreprocessor):
         
         assert self._left_context>=0 and self._right_context>=0
         
-    def apply(self, x):
-                
+    def apply(self, xy):
+
         if (self._left_context + self._right_context)<1:
-            return x;
-    
+            return xy;
+
+        x, y = xy
+
         if len(x.shape) == 2:
-            return self.__splice_single_channel(x)
+            return (self.__splice_single_channel(x), y)
         elif len(x.shape) == 4: #Input from ReshapeAudioChannels, splice each of the channels separately
             
             #print 'SpliceFrames x shape', x.shape
@@ -133,9 +114,8 @@ class SpliceFrames(OnlinePreprocessor):
             
             #print 'SpliceFrames rval shape', rval.shape
             
-            return rval
+            return (rval, y)
         else:
-            print x
             raise Exception('SpliceFrames: expected tensor of length 2 or 4, got %i.'%len(x.shape))
         
     def __splice_single_channel(self, x):
@@ -173,11 +153,10 @@ class FilterFrames(OnlinePreprocessor):
             self.ratio = 1.0
 
     def apply(self, xy):
-        x,y = xy
+        x, y = xy
         if len(self.exclude_list) == 0:
-            return xy;
-
-        v, idx = find(y)
+            return xy
+        return xy
 
 class ReorderByBands(OnlinePreprocessor):
     """
@@ -193,7 +172,7 @@ class ReorderByBands(OnlinePreprocessor):
         self.tied_channels = False #tied_channels - this has to be done at model level by dimshuffling
         self.reshape_stride_for_1D = reshape_stride_for_1D #test whether that will speed up efficiency
         
-    def apply(self, x):
+    def apply(self, xy):
         """
         1) x is assumed to be feature vector as read from kaldi or htk
           providers which is batch_size x (*s*tatics [+ *d*eltas + *d*elta *d*elta + ...]) : s+d+dd+...
@@ -204,7 +183,9 @@ class ReorderByBands(OnlinePreprocessor):
         5) if x is multi-stream (i.e. one stream per microphone) are by defaults treated as separate streams
         6) Look at tests to get more intuition
         """
-               
+
+        x, y = xy
+
         x_shape = x.shape
         xx = x
         if len(x_shape)==2:
@@ -246,7 +227,7 @@ class ReorderByBands(OnlinePreprocessor):
             rval = rval.reshape(rval.shape[0]. rval.shape[1], rval.shape[3]/self.reshape_stride_for_1D, self.reshape_stride_for_1D)
         
         #print 'ReorderByBands rval shape is ',rval.shape
-        return rval
+        return (rval, y)
 
 
 class ReorderByBandsPermute(OnlinePreprocessor):
@@ -267,7 +248,7 @@ class ReorderByBandsPermute(OnlinePreprocessor):
         if tied_deltas is True:
             raise NotImplementedError('ReorderByBandsPermute does not support reordering deltas into separate channels. Use ReorderByBands instead.')
         
-    def apply(self, x):
+    def apply(self, xy):
         """
         1) x is assumed to be feature vector as read from kaldi or htk
           providers which is batch_size x (*s*tatics [+ *d*eltas + *d*elta *d*elta + ...]) : s+d+dd+...
@@ -278,7 +259,9 @@ class ReorderByBandsPermute(OnlinePreprocessor):
         5) if x is 4D tensor (i.e. one channel per microphone) are by default treated as separate streams
         6) Look at tests to get more intuition
         """
-               
+
+        x, y = xy
+
         x_shape = x.shape
         xx = x
         if len(x_shape)==2:
@@ -307,7 +290,7 @@ class ReorderByBandsPermute(OnlinePreprocessor):
             rval = rval.reshape(rval.shape[0]. rval.shape[1], rval.shape[3]/self.reshape_stride_for_1D, self.reshape_stride_for_1D)
         
         #print 'ReorderByBandsPermute rval shape is ',rval.shape
-        return rval
+        return (rval, y)
     
     def invert(self, x):
         if self.permute is None:
@@ -329,6 +312,6 @@ class SpliceChannels(OnlinePreprocessor):
     def __init__(self):
         pass
     
-    def apply(self, x):
+    def apply(self, xy):
         pass
 
