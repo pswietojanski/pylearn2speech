@@ -19,6 +19,7 @@ from pylearn2.utils import serial, sharedX
 
 log = logging.getLogger(__name__)
 
+
 class Pylearn2KaldiDecoderProvider(object):
     def __init__(self, model, preprocessor=None):
         self.model = model

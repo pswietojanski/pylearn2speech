@@ -221,14 +221,13 @@ class SpeechDatasetProvider(Dataset):
     2) The iterator communicates through queues only
     3) [Optional] preprocessor acts online, per mini-batch
     """
-    def __init__(self, provider,
-                       n_classes,
-                       preprocessor=None):
+    def __init__(self,
+                 provider,
+                 preprocessor=None):
 
         #self.args = locals()
         self.provider = provider
         self.preprocessor = preprocessor
-        self.n_classes = n_classes
 
         # will be instantiated by self.iterator() when asked for
         # by training code
@@ -323,7 +322,7 @@ class SpeechDatasetProvider(Dataset):
         in such situations.
         """
 
-        assert self.provider != None
+        assert self.provider is not None
 
         self.provider.reset()
 
@@ -331,11 +330,15 @@ class SpeechDatasetProvider(Dataset):
         self._cache = None
 
         self._queue = Pylearn2CacheSimple.make_queue(15)
-        self._cache = Pylearn2CacheSimple(queue=self._queue, provider=self.provider, batch_size=batch_size, \
-                                          num_classes=self.n_classes, preprocessor=self.preprocessor)
+        self._cache = Pylearn2CacheSimple(queue=self._queue,
+                                          provider=self.provider,
+                                          batch_size=batch_size,
+                                          preprocessor=self.preprocessor)
         self._cache.start()
 
-        return QueuedDatasetIterator(queue=self._queue, dataset_size=self.provider.num_examples, batch_size=batch_size)
+        return QueuedDatasetIterator(queue=self._queue,
+                                     dataset_size=self.provider.num_examples,
+                                     batch_size=batch_size)
 
     def adjust_for_viewer(self, X):
         """
@@ -365,6 +368,9 @@ class SpeechDatasetProvider(Dataset):
         # Subclasses that support topological view must implement this to
         # specify how their data is formatted.
         return 0
+
+    def get_data_specs(self):
+        return self.data_spec
 
     def cache(self):
         return self._cache

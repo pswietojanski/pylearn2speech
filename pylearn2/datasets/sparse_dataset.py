@@ -71,7 +71,7 @@ class SparseDataset(Dataset):
         return self
 
     def next(self):
-        indx = self.subset_iterator.next()
+        indx = self.subset_iterator.next
         try:
             mini_batch = self.sparse_matrix[indx]
         except IndexError:

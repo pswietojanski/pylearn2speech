@@ -1,4 +1,3 @@
-
 __authors__ = "Pawel Swietojanski"
 __copyright__ = "Copyright 2013, University of Edinburgh"
 __credits__ = ["Pawel Swietojanski"]
@@ -9,79 +8,84 @@ __email__ = "p.swietojanski@ed.ac.uk"
 import numpy
 import struct
 import random
+import logging
 
 from multiprocessing import Process, Queue, Pool
 
 from string import Template
 from StringIO import StringIO
-from pylearn2.utils.speech_tmp import PathModifier
 from pylearn2.datasets.speech_utils.providers import ListDataProvider, make_shell_call
+from pylearn2.space import CompositeSpace, Conv2DSpace, VectorSpace
 
-def read_kaldi_matrix(buffer):    
-       
-    descr = struct.unpack('<xcccc', buffer.read(5)) #read 0B{F,D}{V,M,C}[space], function tested for 0BFM types only
-      
+log = logging.getLogger(__name__)
+
+def read_kaldi_matrix(buffer):
+    descr = struct.unpack('<xcccc', buffer.read(5))  # read 0B{F,D}{V,M,C}[space], function tested for 0BFM types only
+
     binary_mode = descr[0]
     repr_type = descr[1]
-    cont_type = descr[2]      
-    
-    assert binary_mode=="B"
-    
-    if (repr_type=='F'):
+    cont_type = descr[2]
+
+    assert binary_mode == "B"
+
+    if (repr_type == 'F'):
         dtype = numpy.dtype(numpy.float32)
-    elif (repr_type=='D'):
+    elif (repr_type == 'D'):
         dtype = numpy.dtype(numpy.float64)
     else:
         raise Exception('Wrong representation type in Kaldi header (is feats '
                         'compression enabled? - this is not supported in the '
-                        'current version. Feel free to add this functionality.): %c'%(repr_type))
+                        'current version. Feel free to add this functionality.): %c' % (repr_type))
 
-    rows,cols = 1, 1  
-    if(cont_type=='M'):
-        p1, rows = struct.unpack('<bi', buffer.read(5)) #bytes from 5 to 10
-        p2, cols = struct.unpack('<bi', buffer.read(5)) #bytes from 10 to 15
-        assert p1==4 and p2==4 #Number of bytes dimensionality is stored?         
-    elif(cont_type=='V'):
-        p1, rows = struct.unpack('<bi', buffer.read(5)) #bytes from 5 to 10
-        assert p1==4
+    rows, cols = 1, 1
+    if (cont_type == 'M'):
+        p1, rows = struct.unpack('<bi', buffer.read(5))  # bytes from 5 to 10
+        p2, cols = struct.unpack('<bi', buffer.read(5))  # bytes from 10 to 15
+        assert p1 == 4 and p2 == 4  # Number of bytes dimensionality is stored?
+    elif (cont_type == 'V'):
+        p1, rows = struct.unpack('<bi', buffer.read(5))  # bytes from 5 to 10
+        assert p1 == 4
     else:
-        raise Exception('Wrong container type in Kaldi header: %c'%(cont_type))
-    
-    assert rows > 0 and cols > 0 #just a range sanity checks
-    assert rows < 360000 and cols < 30000 #just a sensible range sanity checks
-    
-    result = numpy.frombuffer(buffer.read(rows*cols*dtype.itemsize), dtype=dtype)
-    if (cont_type=='M'):
+        raise Exception('Wrong container type in Kaldi header: %c' % (cont_type))
+
+    assert rows > 0 and cols > 0  # just a range sanity checks
+    assert rows < 360000 and cols < 30000  # just a sensible range sanity checks
+
+    result = numpy.frombuffer(buffer.read(rows * cols * dtype.itemsize), dtype=dtype)
+    if (cont_type == 'M'):
         result = numpy.reshape(result, (rows, cols))
-    
+
     return result
 
+
 def read_uttid(buffer):
-    uttid=''
-    c=buffer.read(1)
-    while c!=' ' and c!='':
-       uttid+=c
-       c=buffer.read(1)
-    return uttid 
+    uttid = ''
+    c = buffer.read(1)
+    while c != ' ' and c != '':
+        uttid += c
+        c = buffer.read(1)
+    return uttid
+
 
 def read_ark_entry_from_buffer(buffer):
     """Reads a single Kaldi table archive entry and returns a tuple (uttid, ndarray)"""
     uttid = read_uttid(buffer)
-    if uttid=='':
-        return '' #sygnalize EOF or pipe
+    if uttid == '':
+        return ''  # sygnalize EOF or pipe
     mtrx = None
     try:
-        mtrx = read_kaldi_matrix(buffer) #if this fails will raise (some) exception
+        mtrx = read_kaldi_matrix(buffer)  # if this fails will raise (some) exception
     except Exception as e:
         raise e
     return (uttid, mtrx)
 
+
 def read_ark_entry_from_archive(scp_entry):
     """Reads a single Kaldi table archive entry and returns a numpy array"""
-    
+
     uttid, path = scp_entry.split(" ")
     ark_path, file_pos = path.split(":")
-        
+
     try:
         ark = open(ark_path, 'rb')
         ark.seek(int(file_pos))
@@ -89,17 +93,19 @@ def read_ark_entry_from_archive(scp_entry):
         ark.close()
     except Exception as e:
         raise e
-    
+
     return feats
-    
+
+
 def write_ark_entry_to_buffer(buffer, uttid, activations):
     activations = numpy.asarray(activations, dtype='float32')
     rows, cols = activations.shape
-    buffer.write(struct.pack('<%ds'%(len(uttid)), uttid))
-    buffer.write(struct.pack('<cxcccc', ' ','B','F','M',' '))
+    buffer.write(struct.pack('<%ds' % (len(uttid)), uttid))
+    buffer.write(struct.pack('<cxcccc', ' ', 'B', 'F', 'M', ' '))
     buffer.write(struct.pack('<bi', 4, rows))
     buffer.write(struct.pack('<bi', 4, cols))
     buffer.write(activations)
+
 
 def read_kaldi_aligns(align_filename):
     f = open(align_filename, 'r')
@@ -113,7 +119,7 @@ def read_kaldi_aligns(align_filename):
         [utt, alignment] = line.split(' ', 1)
         # skip empty alignments (these shouldn't be generated by Kaldi anyway)
         if len(alignment) < 1:
-            print 'Empty alignment for utterance %s'%utt
+            log.warning('Empty alignment for utterance %s' % utt)
             continue
         align_info[utt] = numpy.loadtxt(StringIO(alignment), dtype=numpy.int32)
         tmp = align_info[utt].max()
@@ -122,170 +128,173 @@ def read_kaldi_aligns(align_filename):
         num_examples += align_info[utt].shape[0]
     f.close()
     return align_info, num_examples, num_classes
-    
-class KaldiFeatsProviderUtt(ListDataProvider):
 
-    def __init__(self, 
-                 files_paths_list, 
-                 template_shell_command=None, #"copy-feats-1file scp:\"echo ${SCP_ENTRY}|\"", 
-                 randomize=False, 
-                 max_utt=-1, 
-                 max_time=-1,
-                 path_modifier=PathModifier(), 
-                 gmean=None, 
-                 gstdev=None):
-        try:
-            super(KaldiFeatsProviderUtt, self).__init__(files_paths_list, path_modifier, gmean=gmean, gstdev=gstdev)
-            self.max_utt = max_utt 
-            self.randomize = randomize
-            self.template_shell_command = (Template(template_shell_command) if (template_shell_command!=None) else None)
-            if(self.randomize is True):
-                random.shuffle(self.files_list)
-            #self._num_examples=8060414 #terrible hack for Herman's stuff
-        except IOError as e:
-            raise e
-    
+
+class KaldiFeatsProviderUtt(ListDataProvider):
+    def __init__(self,
+                 feats_scp,
+                 feats_dim,
+                 template_shell_command=None,  # "copy-feats-1file scp:\"echo ${SCP_ENTRY}|\"",
+                 randomize=False,
+                 max_utt=-1):
+        """
+
+        :param feats_scp:
+        :param dim:
+        :param template_shell_command:
+        :param randomize:
+        :param max_utt:
+        :return:
+        """
+
+        super(KaldiFeatsProviderUtt, self).__init__(feats_scp)
+        self.max_utt = max_utt
+        self.randomize = randomize
+        self.template_shell_command = (
+                    Template(template_shell_command) if (template_shell_command != None) else None)
+        self.feats_dim = feats_dim
+        if self.randomize is True:
+            random.shuffle(self.files_list)
+
+        self.data_specs = (VectorSpace(dim=self.feats_dim), 'features')
+
     def reset(self):
         self.index = 0
-        if(self.randomize is True):
+        if self.randomize is True:
             random.shuffle(self.files_list)
-    
+
     def __iter__(self):
         return self
-    
+
     def next(self):
-        if ((self.index >= self.list_size) or (self.max_utt>0 and self.index >= self.max_utt)):
+        if (self.index >= self.list_size) or (self.max_utt > 0 and self.index >= self.max_utt):
             raise StopIteration
-        
+
         utt_path = self.files_list[self.index]
-        features=None
+        features = None
         try:
             if self.template_shell_command is None:
                 features = read_ark_entry_from_archive(utt_path)
             else:
                 features = self.shell_call(utt_path)
         except Exception as e:
-            print 'Cannot load file: ', e
-            
+            log.warning('Cannot load file: %s. Skipping.' % e)
         self.index += 1
-        print features.shape        
-        return features, utt_path
-    
+
+        return features
+
     def shell_call(self, utt_path):
-        
+
         shell_call_cmd = self.template_shell_command.substitute(SCP_ENTRY=utt_path)
         buffer_tuple = make_shell_call(shell_call_cmd)
-        
-        features = None
-        if(buffer_tuple!=None):
-            features = read_kaldi_matrix(StringIO(buffer_tuple[0]))
-            #if self.index==0: #print the command only once (or Kaldi stderr)
-            #    print buffer_tuple[1]
-        else:
-            raise Exception('Cannot extract a matrice using shell call %s .'%shell_call_cmd)
-        
+
+        if buffer_tuple is None:
+            raise Exception('Cannot extract a matrix using shell call %s .' % shell_call_cmd)
+
+        features = read_kaldi_matrix(StringIO(buffer_tuple[0]))
+
         return features
-               
+
     @property
     def num_examples(self):
         return self._num_examples
 
- 
+    def get_data_specs(self):
+        return self.data_specs
+
+
 class KaldiAlignFeatsProviderUtt(KaldiFeatsProviderUtt):
+    """Data provider reading Kaldi archives and returning utterance-based
+    features and associated ground-truth labels from alignment files
+    """
 
-    def __init__(self, files_paths_list, align_file, template_shell_command=None, randomize=False,
-                 max_utt=-1, max_time=-1, path_modifier=PathModifier(), gmean=None, gstdev=None, mapped=False):
+    def __init__(self,
+                 feats_scp,
+                 aligns_scp,
+                 feats_dim,
+                 targets_dim,
+                 template_shell_command=None,
+                 randomize=False,
+                 max_time=-1,
+                 max_utt=-1,
+                 frame_shift=10,
+                 mapped=False):
+        """
+
+        :param feats_scp:
+        :param aligns_scp:
+        :param template_shell_command:
+        :param randomize:
+        :param max_time:
+        :param max_utt:
+        :param frame_shift:
+        :param mapped:
+        :return:
+        """
+
+        super(KaldiAlignFeatsProviderUtt, self).__init__(feats_scp=feats_scp,
+                                                         feats_dim=feats_dim,
+                                                         template_shell_command=template_shell_command,
+                                                         randomize=randomize,
+                                                         max_utt=max_utt)
+        self.frame_shift = frame_shift
+        self.targets_dim = targets_dim
+        self._frame_shift_in_sec = self.frame_shift / 1000.0
+        self.utt_skipped = 0
+        self._num_examples = 0
+
+        self.files_info = {}
+        for scp_entry in self.files_list:
+            [utt, path] = scp_entry.split(' ', 1)
+            self.files_info[utt] = scp_entry
+
         try:
-            super(KaldiAlignFeatsProviderUtt, self).__init__(files_paths_list, template_shell_command,
-                                                              randomize, max_utt, max_time, path_modifier, gmean=gmean, gstdev=gstdev)
-            self.utt_skipped = 0
-            self._num_classes = 0
-            self._num_examples = 0
-            
-            self.files_info = {}
-            for scp_entry in self.files_list:
-                [utt, path] = scp_entry.split(' ', 1)
-                self.files_info[utt] = scp_entry
-                
-            self.align_info = {}
-            f = open(align_file, 'r')
-            num_lines_align, num_aligns_found = 0, 0
-            for line in f:
-                num_lines_align += 1
-                line = line.strip()
-                if len(line) < 1:
-                    continue  # remove empty lines
-                [utt, alignment] = line.split(' ', 1)
-                # skip empty alignments (these shouldn't be generated by Kaldi anyway)
-                if len(alignment) < 1:
-                    print 'Empty alignment for utterance %s'%utt
-                    continue
-                
-                #only load the aligments which are actually needed
-                if utt not in self.files_info:
-                    continue
-  
-                self.align_info[utt] = numpy.loadtxt(StringIO(alignment), dtype=numpy.int32)
-
-                tmp = self.align_info[utt].max()
-                if tmp > self._num_classes:
-                    self._num_classes = tmp
-                self._num_examples += self.align_info[utt].shape[0]
-                
-                num_aligns_found += 1
-                
-                #read only 
-                #if self.max_time>0 and self._num_examples > self.max_time:
-                #    break;
-                
-                if len(self.align_info)==len(self.files_info):
-                    break
-                
-                #if num_aligns_found >= max_utt and max_utt > 0:
-                #    break
-                
-            f.close()
-                      
-            print 'KaldiAlignFeatsProviderUtt: Out of %d lines in %s, found %d alignments'%(num_lines_align, align_file, num_aligns_found)
-            print 'KaldiAlignFeatsProviderUtt: %d feature files read'%len(self.files_list)
-            print 'KaldiAlignFeatsProviderUtt: targets dimensionality is %i, number of examples %i'%(self._num_classes, self._num_examples)
-
-            #when asked only subset of data, limit the lists here (given they are large enough at first place)
-            if max_time > 0 and max_time < self._num_examples*0.01:
-                print 'Limiting subset to %d seconds'%max_time
-                self.randomize = False
-                new_aligns_info = {}
-                new_files_list = [];
-                examples_loaded, idx = 0, 0;
-                while examples_loaded*.01 < max_time: #Warning, assumed 10ms shift
-                   scp_entry = self.files_list[idx]; idx += 1;
-                   [utt, path] = scp_entry.split(' ', 1)
-                   if utt not in self.align_info:
-                       continue
-                   new_files_list.append(scp_entry)
-                   new_aligns_info[utt] = self.align_info[utt];
-                   examples_loaded += new_aligns_info[utt].shape[0]
-                   
-                #alter some variables w.r.t new timing
-                self.align_info = new_aligns_info
-                self.files_list = new_files_list
-                self.list_size = len(self.files_list)
-                self._num_examples = examples_loaded #to make Trainer happy it showed all examples it supposed to
-
-            self.mapped = mapped
+            self.align_info, self._num_examples, self._num_classes = \
+                read_kaldi_aligns(aligns_scp)
         except IOError as e:
             raise e
 
+        # when asked only subset of data, limit the lists here (given they are large enough at first place)
+        if 0 < max_time < (self._num_examples * self._frame_shift_in_sec):
+            log.warning('Limiting subset to %d seconds' % max_time)
+            self.randomize = False
+            new_aligns_info = {}
+            new_files_list = []
+            examples_loaded, idx = 0, 0
+            while examples_loaded * self._frame_shift_in_sec < max_time:
+                scp_entry = self.files_list[idx];
+                idx += 1;
+                [utt, path] = scp_entry.split(' ', 1)
+                if utt not in self.align_info:
+                    continue
+                new_files_list.append(scp_entry)
+                new_aligns_info[utt] = self.align_info[utt];
+                examples_loaded += new_aligns_info[utt].shape[0]
+
+            # alter variables w.r.t new timings
+            self.align_info = new_aligns_info
+            self.files_list = new_files_list
+            self.list_size = len(self.files_list)
+            self._num_examples = examples_loaded  # to make Trainer happy it showed all examples it supposed to
+
+        self.mapped = mapped
+
+        feats_space = VectorSpace(dim=self.feats_dim)
+        targets_space = VectorSpace(dim=self.targets_dim)
+        self.data_spec = (CompositeSpace((feats_space, targets_space)), ('features', 'targets'))
+
     def __iter__(self):
         return self
-    
+
     def reset(self):
         super(KaldiAlignFeatsProviderUtt, self).reset()
         self.utt_skipped = 0
-    
+
     def next(self):
-        if ((self.index >= self.list_size) or (self.max_utt>0 and self.index >= self.max_utt)):
-            print 'KaldiAlignFeatsProviderUtt: Skipped %i utterances out of %i'%(self.utt_skipped, len(self.files_list))
+        if (self.index >= self.list_size) or (self.max_utt > 0 and self.index >= self.max_utt):
+            if self.utt_skipped > 0:
+                log.warning('KaldiAlignFeatsProviderUtt: Skipped %i utterances out of %i' % (
+                    self.utt_skipped, len(self.files_list)))
             raise StopIteration
 
         utt_path = self.files_list[self.index]
@@ -297,82 +306,113 @@ class KaldiAlignFeatsProviderUtt(KaldiFeatsProviderUtt):
             else:
                 features = self.shell_call(utt_path)
         except Exception as e:
-            print 'Cannot load file: ', str(e)
+            log.warning('Cannot load file: %s. Skipping.' % e)
 
         self.index += 1
-                
+
         if features is None:
             return (None, None), utt_path
-          
+
         if utt_id in self.align_info:
             labels = self.align_info[utt_id]
         else:
-            #print 'No alignments found for utterannce: %s\n\tIndex %d: %d alignments; %d feats'%(utt_id, self.index, len(self.align_info), len(self.files_list))
             self.utt_skipped += 1
-            labels = None
-            return (features, labels), utt_path
-        
-        #that shouldn't happen at this point
+            return features, None
+
+        # that shouldn't happen at this point
         if features.shape[0] != labels.shape[0]:
-            print 'Alignments for %s have %i frames while the utt has %i. Skipping'%\
-                    (utt_path, labels.shape[0], features.shape[0])
-            return (features, None), utt_path
+            log.warning('Alignments for %s have %i frames while the utt has %i. Skipping' % \
+                        (utt_path, labels.shape[0], features.shape[0]))
+            self.utt_skipped += 1
+            return features, None
 
-        if self.mapped==True:
-            labels = labels-1
+        if self.mapped:
+            labels -= 1
 
-        return (features, labels), utt_path
-    
-    @property
+        return features, labels
+
     def num_classes(self):
-        return self._num_classes
-    
+        return [self.targets_dim]
+
     @property
     def num_examples(self):
         return self._num_examples
 
+    def get_data_specs(self):
+        return self.data_spec
+
 
 class CICDKaldiAlignFeatsProviderUtt(KaldiFeatsProviderUtt):
+    def __init__(self,
+                 feats_scp,
+                 aligns_scp_cd,
+                 aligns_scp_ci,
+                 feats_dim,
+                 targets_cd_dim,
+                 targets_ci_dim,
+                 template_shell_command=None,
+                 randomize=False,
+                 max_utt=-1,
+                 max_time=-1):
+        """
 
-    def __init__(self, flist, aligns_file_cd, aligns_file_m, Y_as_tuple=False, template_shell_command=None, randomize=False,
-                 max_utt=-1, max_time=-1, path_modifier=PathModifier()):
+        :param feats_scp:
+        :param aligns_scp_cd:
+        :param aligns_scp_ci:
+        :param template_shell_command:
+        :param randomize:
+        :param max_utt:
+        :param max_time:
+        :return:
+        """
+        super(CICDKaldiAlignFeatsProviderUtt, self). \
+            __init__(feats_scp=feats_scp,
+                     feats_dim=feats_dim,
+                     template_shell_command=template_shell_command,
+                     randomize=randomize,
+                     max_utt=max_utt)
+
+        self.targets_cd_dim = targets_cd_dim
+        self.targets_ci_dim = targets_ci_dim
+        self.utt_skipped = 0
+        self._num_examples = 0
+
+        files_info = {}
+        for scp_entry in self.files_list:
+            [utt, path] = scp_entry.split(' ', 1)
+            files_info[utt] = scp_entry
+
         try:
-            super(CICDKaldiAlignFeatsProviderUtt, self).__init__(flist, template_shell_command,
-                                                              randomize, max_utt, max_time, path_modifier, gmean=None, gstdev=None)
-            self.utt_skipped = 0
-            self._num_classes = 0
-            self._num_examples = 0
-            self.Y_as_tuple = Y_as_tuple
-
-            files_info = {}
-            for scp_entry in self.files_list:
-                [utt, path] = scp_entry.split(' ', 1)
-                files_info[utt] = scp_entry
-
             align_info_cd, num_examples_cd, num_classes_cd = \
-                read_kaldi_aligns(aligns_file_cd)
+                read_kaldi_aligns(aligns_scp_cd)
             align_info_m, num_examples_m, num_classes_m = \
-                read_kaldi_aligns(aligns_file_m)
-
-            fi_set = set(files_info.keys())
-            aicd_set = set(align_info_cd.keys())
-            aim_set = set(align_info_m.keys())
-            iset = set.intersection(fi_set, aicd_set, aim_set)
-
-            self.files_info, self.align_info_cd, self.align_info_m = {}, {}, {}
-            for k in iset:
-                self.files_info[k] = files_info[k]
-                self.align_info_cd[k] = align_info_cd[k]
-                self.align_info_m[k] = align_info_m[k]
-
-            print "Loaded %i feature files, %i context-dependent and %i monophone alignemts" \
-                    %(len(files_info), len(align_info_cd), len(align_info_m))
-            print "The intersection of those give in total %i training elements"%(len(self.files_info))
-            print "CICDKaldiAlignFeatsProviderUtt: Num of classes is %i (cd) and %i (m) " \
-                    %(num_classes_cd, num_classes_m)
-
+                read_kaldi_aligns(aligns_scp_ci)
         except IOError as e:
             raise e
+
+        fi_set = set(files_info.keys())
+        aicd_set = set(align_info_cd.keys())
+        aim_set = set(align_info_m.keys())
+        iset = set.intersection(fi_set, aicd_set, aim_set)
+
+        self.files_info, self.align_info_cd, self.align_info_m = {}, {}, {}
+        for k in iset:
+            self.files_info[k] = files_info[k]
+            self.align_info_cd[k] = align_info_cd[k]
+            self.align_info_m[k] = align_info_m[k]
+
+        log.warning("Loaded %i feature files, %i context-dependent and %i monophone alignemts" \
+                    % (len(files_info), len(align_info_cd), len(align_info_m)))
+        log.warning("The intersection of those give in total %i training elements" % (len(self.files_info)))
+        log.warning("Num of classes is %i (cd) and %i (m) " \
+                    % (num_classes_cd, num_classes_m))
+
+        feats_space = VectorSpace(dim=self.feats_dim)
+        ci_space = VectorSpace(dim=self.targets_ci_dim)
+        cd_space = VectorSpace(dim=self.targets_cd_dim)
+        space = CompositeSpace([feats_space, ci_space, cd_space])
+        source = ('features', 'targets_cd', 'targets_ci')
+        self.data_spec = (space, source)
 
     def __iter__(self):
         return self
@@ -382,53 +422,58 @@ class CICDKaldiAlignFeatsProviderUtt(KaldiFeatsProviderUtt):
         self.utt_skipped = 0
 
     def next(self):
-        if ((self.index >= self.list_size) or (self.max_utt>0 and self.index >= self.max_utt)):
-            print 'KaldiAlignFeatsProviderUtt: Skipped %i utterances out of %i'%(self.utt_skipped, len(self.files_list))
+        if (self.index >= self.list_size) or (self.max_utt > 0 and self.index >= self.max_utt):
+            if self.utt_skipped > 0:
+                log.warning('KaldiAlignFeatsProviderUtt: Skipped %i utterances out of %i' %
+                            (self.utt_skipped, len(self.files_list)))
             raise StopIteration
 
         utt_path = self.files_list[self.index]
         utt_id = utt_path.split(" ")[0]
+        none_tuple = (None, None, None)
 
         if utt_id not in self.files_info:
             self.index += 1
-            return (None, None), utt_path
+            return none_tuple
 
-        features, labels = None, None
         try:
             features = read_ark_entry_from_archive(utt_path)
         except Exception as e:
-            print 'Cannot load file: ', str(e)
+            log.warning('Cannot load file: %s. Skipped', str(e))
+            self.utt_skipped += 1
 
         self.index += 1
 
         if features is None:
-            return (None, None), utt_path
+            return none_tuple
 
         labels_cd = self.align_info_cd[utt_id]
         labels_m = self.align_info_m[utt_id]
 
-        #that shouldn't happen at this point
+        # that shouldn't happen at this point
         if (features.shape[0] != labels_cd.shape[0]) or (features.shape[0] != labels_m.shape[0]):
-            print 'Alignments for %s have %i frames while the utt has %i. Skipping'%\
-                    (utt_path, labels_cd.shape[0], features.shape[0])
-            return (features, None), utt_path
+            log.warning('Alignments for %s have %i frames while the utt has %i. Skipping' % \
+                        (utt_path, labels_cd.shape[0], features.shape[0]))
+            return none_tuple
 
-        labels_m = labels_m - 1 #monophones in Kaldi are indexed from 1
+        labels_m -= 1  # monophones in Kaldi are indexed from 1
 
-        if self.Y_as_tuple is True:
-            labels = (labels_cd, labels_m)
-        else:
-            labels = numpy.concatenate((numpy.reshape(labels_cd,(-1, 1)), numpy.reshape(labels_m, (-1, 1))), axis=1)
+        return features, labels_cd, labels_m
 
-        return (features, labels), utt_path
-
-    @property
     def num_classes(self):
-        return self._num_classes
+        return [self.targets_cd_dim, self.targets_ci_dim]
 
     @property
     def num_examples(self):
         return self._num_examples
+
+    def get_data_specs(self):
+        return self.data_spec
+
+
+class SequenceKaldiAlignFeatsProviderUtt(KaldiFeatsProviderUtt):
+    def __init__(self):
+        pass
 
 
 class MultiStreamCall(Process):
@@ -437,9 +482,9 @@ class MultiStreamCall(Process):
         self.thread_id = thread_id
         self.in_queue = in_queue
         self.out_queue = out_queue
-        
+
     def run(self):
-        #print 'Starting a %s'%self.thread_id
+        # print 'Starting a %s'%self.thread_id
         scp_entry = self.in_queue.get(block=True)
         while (scp_entry is not None):
             try:
@@ -449,33 +494,34 @@ class MultiStreamCall(Process):
                 print e
                 self.out_queue.put(None)
             scp_entry = self.in_queue.get(block=True)
-        #print 'Finishing %s'%self.thread_id
-        
-        
+            # print 'Finishing %s'%self.thread_id
+
+
 class MultiStreamKaldiAlignFeatsProviderUtt(KaldiAlignFeatsProviderUtt):
     def __init__(self, files_paths_lists, align_file, template_shell_command, randomize=False,
-                 subset=-1, mapped=False, concatenated=True, path_modifier=PathModifier()):
-        
-        assert files_paths_lists!=None and len(files_paths_lists)>1
-        
+                 subset=-1, mapped=False, concatenated=True):
+
+        assert files_paths_lists != None and len(files_paths_lists) > 1
+
         try:
-            super(MultiStreamKaldiAlignFeatsProviderUtt, self).__init__(files_paths_lists[0], align_file, template_shell_command,
-                                                              randomize=False, max_utt=subset, path_modifier=path_modifier, 
-                                                              gmean=None, gstdev=None, mapped=mapped)
-            
-            self.concatenated=concatenated
+            super(MultiStreamKaldiAlignFeatsProviderUtt, self).__init__(files_paths_lists[0], align_file,
+                                                                        template_shell_command,
+                                                                        randomize=False, max_utt=subset,
+                                                                        mapped=mapped)
+
+            self.concatenated = concatenated
             utt_paths = []
-            #load the lists splitted into UTTIDs (keys) and PATHs into separate dictionaries
+            # load the lists splitted into UTTIDs (keys) and PATHs into separate dictionaries
             for f in files_paths_lists:
                 dp, dpd = ListDataProvider(f), {}
-                for line in dp.files_list: 
-                   [utt, path] = line.split(' ', 1)
-                   dpd[utt]=line
+                for line in dp.files_list:
+                    [utt, path] = line.split(' ', 1)
+                    dpd[utt] = line
                 utt_paths.append(dpd)
-            self.num_streams=len(utt_paths)
-                 
-            #now agree with aligns and get rid of any missing feats for any of the streams with the given UTTID
-            self.utt_infos={} 
+            self.num_streams = len(utt_paths)
+
+            # now agree with aligns and get rid of any missing feats for any of the streams with the given UTTID
+            self.utt_infos = {}
             for akey in self.align_info:
                 paths, missing_paths = [], []
                 for i in xrange(0, len(utt_paths)):
@@ -483,90 +529,94 @@ class MultiStreamKaldiAlignFeatsProviderUtt(KaldiAlignFeatsProviderUtt):
                         paths.append(utt_paths[i][akey])
                     else:
                         missing_paths.append(i)
-                if len(missing_paths)==0:
-                    self.utt_infos[akey]=paths
+                if len(missing_paths) == 0:
+                    self.utt_infos[akey] = paths
                 else:
-                    print 'UTTID %s - not found feats for the following stream IDs : %s'% \
-                       (akey, ", ".join(str(x) for x in missing_paths))
-            
-            self.keys=self.utt_infos.keys()
+                    print 'UTTID %s - not found feats for the following stream IDs : %s' % \
+                          (akey, ", ".join(str(x) for x in missing_paths))
+
+            self.keys = self.utt_infos.keys()
             if randomize is True:
                 random.shuffle(self.keys)
-                
-            #prepare (and run) stream providing threads
+
+            # prepare (and run) stream providing threads
             self.stream_threads, self.stream_inqueues, self.stream_outqueues = [], [], []
             for s in xrange(0, self.num_streams):
                 self.stream_inqueues.append(Queue(maxsize=1))
                 self.stream_outqueues.append(Queue(maxsize=1))
-                self.stream_threads.append(MultiStreamCall('Stream-%i'%s, self.stream_inqueues[s], self.stream_outqueues[s]))
+                self.stream_threads.append(
+                    MultiStreamCall('Stream-%i' % s, self.stream_inqueues[s], self.stream_outqueues[s]))
                 self.stream_threads[s].start()
-                
+
         except IOError as e:
             raise e
 
     def __iter__(self):
         return self
-    
+
     def reset(self):
-       if self.randomize is True:
-           random.shuffle(self.keys)
-       self.index = 0
-       
-       for s in xrange(0, self.num_streams):
-           self.stream_threads[s].terminate()
-           
-       self.stream_threads, self.stream_inqueues, self.stream_outqueues = [], [], []
-       for s in xrange(0, self.num_streams):
-           self.stream_inqueues.append(Queue(maxsize=1))
-           self.stream_outqueues.append(Queue(maxsize=1))
-           self.stream_threads.append(MultiStreamCall('Stream-%i'%s, self.stream_inqueues[s], self.stream_outqueues[s]))
-           self.stream_threads[s].start()
-        
+        if self.randomize is True:
+            random.shuffle(self.keys)
+        self.index = 0
+
+        for s in xrange(0, self.num_streams):
+            self.stream_threads[s].terminate()
+
+        self.stream_threads, self.stream_inqueues, self.stream_outqueues = [], [], []
+        for s in xrange(0, self.num_streams):
+            self.stream_inqueues.append(Queue(maxsize=1))
+            self.stream_outqueues.append(Queue(maxsize=1))
+            self.stream_threads.append(
+                MultiStreamCall('Stream-%i' % s, self.stream_inqueues[s], self.stream_outqueues[s]))
+            self.stream_threads[s].start()
+
     def next(self):
-        if ((self.index >= len(self.utt_infos)) or (self.max_utt>0 and self.index >= self.max_utt)):
+        if ((self.index >= len(self.utt_infos)) or (self.max_utt > 0 and self.index >= self.max_utt)):
             for s in xrange(0, self.num_streams):
                 self.stream_inqueues[s].put(None)
             raise StopIteration
 
-        
         utt_id = self.keys[self.index]
         self.index += 1
-        
+
         features, labels = None, None
-        
+
         if utt_id in self.align_info:
             labels = self.align_info[utt_id]
         else:
-            #print 'No alignments found for utterannce: %s\n\tIndex %d: %d alignments; %d feats'%(utt_id, self.index, len(self.align_info), len(self.files_list))
+            # print 'No alignments found for utterannce: %s\n\tIndex %d: %d alignments; %d feats'%(utt_id, self.index, len(self.align_info), len(self.files_list))
             return (features, labels), utt_id
-        
+
         utt_paths = self.utt_infos[utt_id]
-        feats_list = [None]*self.num_streams
+        feats_list = [None] * self.num_streams
 
         try:
             for s in xrange(0, self.num_streams):
                 self.stream_inqueues[s].put(utt_paths[s])
-            for s in xrange(0, self.num_streams): #this loop and queue secures proper synchronisation
+            for s in xrange(0, self.num_streams):  # this loop and queue secures proper synchronisation
                 feats_list[s] = self.stream_outqueues[s].get(block=True)
         except Exception as e:
-            print 'Something failed: ', e, buffer_tuple[1]  #, align_tuple[1]
-            
+            print 'Something failed: ', e, buffer_tuple[1]  # , align_tuple[1]
+
         for i in xrange(0, len(feats_list)):
-            if (feats_list[i] is None): 
+            if (feats_list[i] is None):
                 return (None, None), utt_id
-               
+
         for feats in feats_list:
             if feats.shape[0] != labels.shape[0]:
-                print 'Alignments for %s have %i frames while the utt has %i. Skipping'%\
-                        (utt_path, labels.shape[0], features.shape[0])
+                print 'Alignments for %s have %i frames while the utt has %i. Skipping' % \
+                      (utt_path, labels.shape[0], features.shape[0])
                 return (feats_list, None), utt_id
-       
-        if self.mapped==True:
-            labels = labels-1
-        
+
+        if self.mapped == True:
+            labels = labels - 1
+
         if self.concatenated is False:
             return (feats_list, labels), utt_id
-        
-        features = numpy.concatenate(feats_list, axis=1) #concatenate the channels to make one big vector
-                      
-        return (features, labels), utt_id 
+
+        features = numpy.concatenate(feats_list, axis=1)  # concatenate the channels to make one big vector
+
+        return (features, labels)
+
+    def get_data_specs(self):
+        raise NotImplementedError(str(type(self)) + " does not implement get_data_sepcs.")

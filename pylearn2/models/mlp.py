@@ -238,6 +238,9 @@ class MLP(Layer):
     def get_output_space(self):
         return self.layers[-1].get_output_space()
 
+    def get_target_source(self):
+        return self.layers[-1].get_target_source()
+
     def _update_layer_input_spaces(self):
         """
             Tells each layer what its input space should be.
@@ -300,6 +303,10 @@ class MLP(Layer):
         space = CompositeSpace((self.get_input_space(),
                                 self.get_output_space()))
         source = (self.get_input_source(), self.get_target_source())
+
+        print space
+        print source
+
         return (space, source)
 
     def get_params(self):
@@ -1262,22 +1269,26 @@ class CICDSoftmax(Layer):
     """
     A context-dependent-independent softmax layer
     """
-    def __init__(self, cd_n_classes, ci_n_classes, layer_name,
-                 irange = None,  istdev = None,
-                 sparse_init = None,
-                 W_lr_scale = None,
-                 C_lr_scale = None,
-                 M_lr_scale = None,
-                 b_lr_scale = None,
-                 m_lr_scale = None,
-                 max_row_norm = None,
-                 max_col_norm = None,
-                 M_max_row_norm = None,
-                 M_max_col_norm = None,
-                 C_max_row_norm = None,
-                 C_max_col_norm = None,
-                 ci_cost_scaler = 0.5,
-                 prediction_mode = False):
+    def __init__(self,
+                 layer_name,
+                 cd_n_classes,
+                 ci_n_classes,
+                 prediction_mode=False,
+                 ci_cost_scaler=0.3,
+                 irange=None,
+                 istdev=None,
+                 sparse_init=None,
+                 W_lr_scale=None,
+                 C_lr_scale=None,
+                 M_lr_scale=None,
+                 b_lr_scale=None,
+                 m_lr_scale=None,
+                 max_row_norm=None,
+                 max_col_norm=None,
+                 M_max_row_norm=None,
+                 M_max_col_norm=None,
+                 C_max_row_norm=None,
+                 C_max_col_norm=None):
         """
         """
 
@@ -1296,7 +1307,20 @@ class CICDSoftmax(Layer):
         assert isinstance(cd_n_classes, py_integer_types)
         assert isinstance(ci_n_classes, py_integer_types)
 
-        self.output_space = VectorSpace(cd_n_classes)
+        if self.prediction_mode:
+            self.output_space = VectorSpace(cd_n_classes)
+        else:
+            self.output_space = CompositeSpace((VectorSpace(cd_n_classes),
+                                                VectorSpace(ci_n_classes)))
+
+    def get_target_source(self):
+        if self.prediction_mode:
+            return 'targets_cd'
+        else:
+            return 'targets_cd', 'targets_ci'
+
+    def get_output_space(self):
+        return self.output_space
 
     def get_lr_scalers(self):
 
@@ -1324,7 +1348,7 @@ class CICDSoftmax(Layer):
         if not hasattr(self, 'm_lr_scale'):
             self.m_lr_scale = None
 
-        if self.b_lr_scale is not None:
+        if self.m_lr_scale is not None:
             assert isinstance(self.m_lr_scale, float)
             rval[self.m] = self.m_lr_scale
 
@@ -1396,7 +1420,8 @@ class CICDSoftmax(Layer):
 
             if target is not None:
 
-                target_cd = target[:,0:self.cd_n_classes]
+                target_cd, target_ci = target
+
                 y_hat_cd = T.argmax(state_cd, axis=1)
                 y_cd = T.argmax(target_cd, axis=1)
                 misclass = T.neq(y_cd, y_hat_cd).mean()
@@ -1404,7 +1429,6 @@ class CICDSoftmax(Layer):
                 rval['misclass'] = misclass
                 rval['nll'] = self._cost_partial(Y_hat=state_cd, Y=target_cd)
 
-                target_ci = target[:,self.cd_n_classes:]
                 y_hat_ci = T.argmax(state_ci, axis=1)
                 y_ci = T.argmax(target_ci, axis=1)
                 misclass = T.neq(y_ci, y_hat_ci).mean()
@@ -1505,14 +1529,13 @@ class CICDSoftmax(Layer):
         M = T.dot(state_below, self.M) + m
         Z = T.dot(state_below, self.W) + T.dot(M, self.C) + b
 
-        rval_m = T.nnet.softmax(M)
         rval_cd = T.nnet.softmax(Z)
 
         if self.prediction_mode is True:
             return rval_cd
         else:
-            #return T.concatenate((rval_cd, rval_m), axis=1)
-            return (rval_cd, rval_m)
+            rval_m = T.nnet.softmax(M)
+            return rval_cd, rval_m
 
     def cost(self, Y, Y_hat):
         """
@@ -1525,16 +1548,14 @@ class CICDSoftmax(Layer):
             "You need to set prediction_mode to false for training"
         )
 
+        Y_cd, Y_ci = Y
         Y_hat_cd, Y_hat_ci = Y_hat
-        Y_cd = Y[:,0:self.cd_n_classes]
-        Y_ci = Y[:,self.cd_n_classes:]
-
         rval_cd = self._cost_partial(Y_cd, Y_hat_cd)
         rval_ci = self._cost_partial(Y_ci, Y_hat_ci)
 
         rval = (1-self.ci_cost_scaler)*rval_cd + self.ci_cost_scaler*rval_ci
 
-        return - rval
+        return -rval
 
     def _cost_partial(self, Y, Y_hat):
 

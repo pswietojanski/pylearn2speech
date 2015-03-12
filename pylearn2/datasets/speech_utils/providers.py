@@ -15,16 +15,21 @@ See the Apache 2 License for the specific language governing permissions and
 limitations under the License.
 '''
 
-import os, subprocess, logging, re, numpy
+import os
+import subprocess
+import logging
+import re
+import numpy
 
 from subprocess import Popen, PIPE, CalledProcessError
-from pylearn2.utils.speech_tmp import PathModifier
+
+log = logging.getLogger(__name__)
 
 def make_shell_call(shell_call):
     buffer_tuple = (None, None)
     try:
         buffer_tuple = Popen(args=shell_call, bufsize=-1, \
-                    stdout=PIPE, stderr=PIPE, shell=True).communicate()
+                             stdout=PIPE, stderr=PIPE, shell=True).communicate()
         return buffer_tuple
     except CalledProcessError as cpe:
         print 'CPE', cpe
@@ -37,81 +42,42 @@ def make_shell_call(shell_call):
         return None
     return None
 
-class ListDataProvider(object):
 
-    def __init__(self, files_paths_list, path_modifier=PathModifier(), gmean=None, gstdev=None, uttid_regex=None):
-        self.path_modifier = path_modifier
+class ListDataProvider(object):
+    def __init__(self, files_paths_list):
         try:
             f = open(files_paths_list, 'r')
             lines = f.readlines()
             f.close()
-            
-            #remove potential empty lines and end of line signs
+
             self.files_list = []
             for line in lines:
                 if len(line.strip()) < 1:
                     continue
-                self.files_list.append(self.path_modifier.get_path(line.strip()))
-            
+                self.files_list.append(line.strip())
+
             self.index = 0
             self.list_size = len(self.files_list)
-            self.uttid_regex = uttid_regex
-            self.gmean = gmean
-            self.gstdev = gstdev
         except IOError as e:
             logging.error(e)
             raise e
-    
+
     def __iter__(self):
-        return self 
-    
+        return self
+
     def next(self):
         if self.index >= self.list_size:
             raise StopIteration
-        utt_path = self.files_list[self.index]           
+        utt_path = self.files_list[self.index]
         self.index += 1
         return utt_path
-    
-    def normalise_matrix(self, features, gmean=None, gstdev=None, mean=0.0, var=1.0):
-        if (gmean is None and gstdev is None):
-            return features
-        elif (gmean != None and gstdev is None):
-            return (features - gmean) + mean
-        else: 
-            return (features - gmean)/gstdev*var + mean
-       
-    def generate_flist(self, output_fname):
-        fout = open(output_fname, 'w')
-        for path in self.files_list:
-            print >> fout, path 
-        fout.close()
-    
-    def generate_map_flist(self, output_fname, rel2abs=False):
-        fout = open(output_fname, 'w')
-        for path in self.files_list:
-            if rel2abs: path = os.path.abspath(path)
-            print >> fout, self.extract_uttid_from_path(path)+' '+path 
-        fout.close()
-        
+
     def reset(self):
         self.index = 0
-    
-    @staticmethod
-    def extract_uttid_from_path(path, uttid_regex=None):
-        #TODO Move this regex to some sort of config and compile it once!
-        if uttid_regex is None:
-            #by default assume filename without extension
-            uttid_regex = '(.*)\..*'      
-        uttid_re = re.compile(r'%s'%uttid_regex)
-        fname =  os.path.basename(path)
-        mm = uttid_re.match(fname)
-        if mm!=None:           
-            return mm.group(1)
-        else:
-            print 'Cannot match UTTID using %s from %s !'%(uttid_regex, fname)
-            return None
-        #return (os.path.basename(path).split('.')[0])[4:]
-        
+
+    def get_data_specs(self):
+        raise NotImplementedError(str(type(self)) + " does not implement get_data_sepcs.")
+
 
 class BufferedProvider(object):
     def __init__(self, provider, batch_size):
@@ -119,146 +85,177 @@ class BufferedProvider(object):
         self.batch_size = batch_size
         self.feats_buf = []
         self.labs_buf = []
-        self.max_buf_elems = 20 
-        self.feats_tail=None
-        self.labs_tail=None
-        self.finished=False
-        
+        self.max_buf_elems = 20
+        self.feats_tail = None
+        self.labs_tail = None
+        self.finished = False
+
         self.provider.reset()
-        
+
     def reset(self):
         self.provider.reset()
         self.finished = False
-    
+
     @property
     def num_classes(self):
         return self.provider.num_classes
-      
+
     def __iter__(self):
         return self
-    
+
     def next(self):
         try:
-            if (len(self.feats_buf)<1):
-                
+            if len(self.feats_buf) < 1:
+
                 if self.finished: raise StopIteration
-                
+
                 tmp_feats_list, tmp_labs_list = [], []
-                num_frames_read=0
-                
-                if self.feats_tail != None and self.labs_tail != None:
+                num_frames_read = 0
+
+                if self.feats_tail is not None and self.labs_tail is not None:
                     tmp_feats_list.append(self.feats_tail)
                     tmp_labs_list.append(self.labs_tail)
                     num_frames_read = self.feats_tail.shape[0]
                     self.feats_tail, self.labs_tail = None, None
-                
+
                 try:
-                    while num_frames_read < self.max_buf_elems*self.batch_size:
-                        result, utt = self.provider.next()
+                    while num_frames_read < self.max_buf_elems * self.batch_size:
+                        result, utt = self.provider.next
                         if (result[0] is None) or (result[1] is None):
-                            #print 'BufferedProvider: skipping %s'%utt
+                            # print 'BufferedProvider: skipping %s'%utt
                             continue
                         num_frames_read += result[0].shape[0]
                         tmp_feats_list.append(result[0])
                         tmp_labs_list.append(result[1])
                 except StopIteration:
                     self.finished = True
-                
-                if self.finished and num_frames_read<self.batch_size:
+
+                if self.finished and num_frames_read < self.batch_size:
                     raise StopIteration
-                
+
                 feats = numpy.concatenate(tmp_feats_list)
                 labs = numpy.concatenate(tmp_labs_list)
-                
-                assert feats.shape[0] == labs.shape[0]
-                
-                indexes = numpy.arange(self.batch_size, feats.shape[0], self.batch_size)
-                self.feats_buf=numpy.split(feats, indexes)
-                self.labs_buf=numpy.split(labs, indexes)
 
-                if self.feats_buf[-1].shape[0]!=self.batch_size:
+                assert feats.shape[0] == labs.shape[0]
+
+                indexes = numpy.arange(self.batch_size, feats.shape[0], self.batch_size)
+                self.feats_buf = numpy.split(feats, indexes)
+                self.labs_buf = numpy.split(labs, indexes)
+
+                if self.feats_buf[-1].shape[0] != self.batch_size:
                     self.feats_tail = self.feats_buf.pop()
                     self.labs_tail = self.labs_buf.pop()
 
             feats = self.feats_buf.pop()
             labs = self.labs_buf.pop()
             return (feats, labs)
-               
+
         except StopIteration:
             raise StopIteration
 
 
-class RandomizedBufferedProvider(object):
-    def __init__(self, provider, batch_size, shuffling_window=2**15):
+class BufferedProviderDataSpec(object):
+    def __init__(self, provider, batch_size):
         self.provider = provider
         self.batch_size = batch_size
-        self.shuffling_window = shuffling_window
-        self.feats_buf = []
-        self.labs_buf = []
         self.max_buf_elems = 20
-        self.feats_tail=None
-        self.labs_tail=None
-        self.finished=False
-
+        self.finished = False
+        self.buffer = []
+        self.buffer_tail = None
         self.provider.reset()
+
+        self.space, self.sources = self.provider.get_data_specs()
 
     def reset(self):
         self.provider.reset()
         self.finished = False
-
-    @property
-    def num_classes(self):
-        return self.provider.num_classes
 
     def __iter__(self):
         return self
 
     def next(self):
         try:
-            if (len(self.feats_buf)<1):
 
-                if self.finished: raise StopIteration
+            if len(self.buffer) < 1:
 
-                tmp_feats_list, tmp_labs_list = [], []
-                num_frames_read=0
+                if self.finished:
+                    raise StopIteration
 
-                if self.feats_tail != None and self.labs_tail != None:
-                    tmp_feats_list.append(self.feats_tail)
-                    tmp_labs_list.append(self.labs_tail)
-                    num_frames_read = self.feats_tail.shape[0]
-                    self.feats_tail, self.labs_tail = None, None
+                num_frames_read = 0
+                tmp_buffer = []
+                if self.buffer_tail is not None:
+                    tmp_buffer.append(self.buffer_tail)
+                    num_frames_read += self.buffer_tail[0].shape[0]
+                    self.buffer_tail = None
 
                 try:
-                    while num_frames_read < self.max_buf_elems*self.batch_size:
-                        result, utt = self.provider.next()
-                        if (result[0] is None) or (result[1] is None):
-                            #print 'BufferedProvider: skipping %s'%utt
+                    while num_frames_read < self.max_buf_elems * self.batch_size:
+                        utt = self.provider.next()
+                        if any(u is None for u in utt) or len(utt) != len(self.sources):
+                            #log.warning('Data specs expected to be %s but provider'
+                            #            'returned %i spaces and at least one of them'
+                            #            'is None. This could be a broken example'
+                            #            '(missing targets or features). Skipping.'
+                            #            % (self.sources, len(utt)))
                             continue
-                        num_frames_read += result[0].shape[0]
-                        tmp_feats_list.append(result[0])
-                        tmp_labs_list.append(result[1])
+                        # TODO: add assert checking if shape[0] of all u is the same
+                        num_frames_read += utt[0].shape[0]
+                        tmp_buffer.append(utt)
                 except StopIteration:
                     self.finished = True
 
-                if self.finished and num_frames_read<self.batch_size:
+                if self.finished and (0 < num_frames_read < self.batch_size):
+                    log.warning('Skipped last %i random elements in dataset '
+                                'since it did not fit into full batch of '
+                                'size %i (they are likely to be presented '
+                                'in the next iteration)' %
+                                (num_frames_read, self.batch_size))
                     raise StopIteration
 
-                feats = numpy.concatenate(tmp_feats_list)
-                labs = numpy.concatenate(tmp_labs_list)
+                # transpose [ (x1,y1,...), (x2,y2,...), ...]
+                # to [ (x1, x2, ...), (y1, y2, ...), ...]
+                # so we can concatenate corresponding spaces and
+                # create mini-batches of specified size 'batch_size'
+                trans = zip(*tmp_buffer)
+                assert len(trans) == len(self.sources), (
+                    "Unzipped list of unexpected length %i instead of %i spaces." % \
+                    (len(trans), len(self.sources))
+                )
 
-                assert feats.shape[0] == labs.shape[0]
+                batched_data = []
+                for space in trans:
+                    space_data = numpy.concatenate(space, axis=0)
+                    indexes = numpy.arange(self.batch_size, space_data.shape[0], self.batch_size)
+                    space_data_mbatches = numpy.split(space_data, indexes)
+                    # TODO: any other way using in-built function can do this in a more efficient/elegant way?
+                    #from a list of numpy arrays need to make a list of tuples of numpy arrays
+                    #so each element on the list is a tuple that contains a batch_size of
+                    # elements in format accepted by data_specs, most likely something like
+                    # [(ndarray, ndarray, ...), (ndarray, ndarray, ...), ... ]
+                    batched_data.append(space_data_mbatches)
 
-                indexes = numpy.arange(self.batch_size, feats.shape[0], self.batch_size)
-                self.feats_buf=numpy.split(feats, indexes)
-                self.labs_buf=numpy.split(labs, indexes)
+                self.buffer = zip(*batched_data)
 
-                if self.feats_buf[-1].shape[0]!=self.batch_size:
-                    self.feats_tail = self.feats_buf.pop()
-                    self.labs_tail = self.labs_buf.pop()
+                # self.buffer is now [(x,y,z),(x,y,z), where x,y,z are nd array each
+                # at least x is always expected to exists, so it is safe to address [0]
+                if self.buffer[-1][0].shape[0] != self.batch_size:
+                    self.buffer_tail = self.buffer.pop()
 
-            feats = self.feats_buf.pop()
-            labs = self.labs_buf.pop()
-            return (feats, labs)
+            rval = self.buffer.pop()
+            self._validate_batch(rval)
+
+            return rval
 
         except StopIteration:
             raise StopIteration
+
+    def _validate_batch(self, batch):
+        if not isinstance(batch, tuple):
+            raise TypeError("The value of batch is expected to be tuple"
+                            "but got %s of type" % (batch, type(batch)))
+        if len(batch) != len(self.sources):
+            raise ValueError("Expected %d elements in batch, got %d"
+                             % (len(self.sources), len(batch)))
+
+    def num_classes(self):
+        return self.provider.num_classes()

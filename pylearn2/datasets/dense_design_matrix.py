@@ -348,14 +348,14 @@ class DenseDesignMatrix(Dataset):
             dataset_iter = self.iterator(mode=_mode,
                     batch_size=(self.num_examples - train_size),
                     num_batches=2)
-            train = dataset_iter.next()
-            valid = dataset_iter.next()
+            train = dataset_iter.next
+            valid = dataset_iter.next
         elif train_prop !=0:
             size = np.ceil(self.num_examples * train_prop)
             dataset_iter = self.iterator(mode=_mode,
                     batch_size=(self.num_examples - size))
-            train = dataset_iter.next()
-            valid = dataset_iter.next()
+            train = dataset_iter.next
+            valid = dataset_iter.next
         else:
             raise ValueError("Initialize either split ratio and split size to non-zero value.")
         return (train, valid)

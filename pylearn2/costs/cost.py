@@ -187,6 +187,7 @@ class SumOfCosts(Cost):
         nested_data = mapping.nest(data)
         costs = []
         for cost, cost_data in safe_zip(self.costs, nested_data):
+            print cost_data
             costs.append(cost.expr(model, cost_data, **kwargs))
         assert len(costs) > 0
 

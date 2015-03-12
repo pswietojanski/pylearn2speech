@@ -13,7 +13,7 @@ from pylearn2.utils.iteration import (
 def test_misc_exceptions():
     raised = False
     try:
-        SubsetIterator.__new__(SubsetIterator).next()
+        SubsetIterator.__new__(SubsetIterator).next
     except NotImplementedError:
         raised = True
     assert raised
@@ -33,19 +33,19 @@ def test_misc_exceptions():
 
 def test_correct_sequential_slices():
     iterator = SequentialSubsetIterator(10, 3, 4)
-    sl = iterator.next()
+    sl = iterator.next
     assert sl.start == 0
     assert sl.stop == 3
     assert sl.step is None
-    sl = iterator.next()
+    sl = iterator.next
     assert sl.start == 3
     assert sl.stop == 6
     assert sl.step is None
-    sl = iterator.next()
+    sl = iterator.next
     assert sl.start == 6
     assert sl.stop == 9
     assert sl.step is None
-    sl = iterator.next()
+    sl = iterator.next
     assert sl.start == 9
     assert sl.stop == 10
     assert sl.step is None
@@ -80,12 +80,12 @@ def test_sequential_num_batches_and_batch_size():
         # (with one under-sized batch).
         iterator = SequentialSubsetIterator(10, 3, 4)
         for i in range(4):
-            iterator.next()
+            iterator.next
     except Exception as e:
         assert False
     raised = False
     try:
-        iterator.next()
+        iterator.next
     except StopIteration:
         raised = True
     assert raised
@@ -94,12 +94,12 @@ def test_sequential_num_batches_and_batch_size():
         # (with one to spare).
         iterator = SequentialSubsetIterator(10, 3, 3)
         for i in range(3):
-            iterator.next()
+            iterator.next
     except Exception:
         assert False
     raised = False
     try:
-        iterator.next()
+        iterator.next
     except StopIteration:
         raised = True
     assert raised

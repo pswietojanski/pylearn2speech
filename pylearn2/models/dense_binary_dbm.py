@@ -809,19 +809,19 @@ class DBM(Model):
             assert batch_size == self.batch_size
         if self.num_classes > 0:
             try:
-                X, Y = self.iterator.next()
+                X, Y = self.iterator.next
             except StopIteration:
                 print 'Finished a dataset-epoch'
                 make_iterator()
-                X, Y = self.iterator.next()
+                X, Y = self.iterator.next
         else:
             Y = None
             try:
-                X = self.iterator.next()
+                X = self.iterator.next
             except StopIteration:
                 print 'Finished a dataset-epoch'
                 make_iterator()
-                X = self.iterator.next()
+                X = self.iterator.next
 
         self.learn_mini_batch(X,Y)
         return True

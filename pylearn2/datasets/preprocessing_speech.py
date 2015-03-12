@@ -4,35 +4,134 @@ i.e. splicing context frames or shuffling dimensions for frequency band convolut
 __authors__ = "Pawel Swietojanski"
 __copyright__ = "Copyright 2013, University of Edinburgh"
 
-import numpy, theano
+import numpy
+import theano
 
-class OnlinePreprocessor():
-    def __init__(self):
-        pass
+
+class OnlinePreprocessor(object):
+    def __init__(self, act_on_sources='features'):
+        assert act_on_sources is not None, (
+            "You need to specify the source preprocessor should act on"
+        )
+        self.act_on_sources = act_on_sources if \
+            isinstance(act_on_sources, tuple) else tuple(act_on_sources)
+
     def apply(self, xy):
-        return xy
-    
+        raise NotImplementedError('This is abstract class which does not implement preprocessing')
+
+    def get_pre_data_spec(self):
+        return NotImplementedError('This is abstract class which does not implement data_specs')
+
+    def get_post_data_spec(self):
+        return NotImplementedError('This is abstract class which does not implement data_specs')
+
+
 class PipelineOnlinePreprocessor(OnlinePreprocessor):
-    def __init__(self, items):
+    def __init__(self, items, act_on_sources='features'):
+        super(PipelineOnlinePreprocessor, self).__init__(act_on_sources)
         self.items = items if items is not None else []
         
     def apply(self, xy):
-        #Note x could be a numpy array or a list of a numpy arrays
-        #In the latter case each element from the list is preprocessed by the pipeline independently using the same preprocessors
-
         rval = xy
         for item in self.items:
             rval = item.apply(rval)
         return rval
 
+    def get_pre_data_spec(self):
+        return NotImplementedError('This is abstract class which did not implement data_specs')
+
+    def get_post_data_spec(self):
+        return NotImplementedError('This is abstract class which did not implement data_specs')
+
+
+class SpliceFrames(OnlinePreprocessor):
+    def __init__(self, left_context=4, right_context=4, add_paddings=True, act_on_sources='features'):
+        """
+        :param left_context: number of frames on the left from central one
+        :param right_context: number of frames on the right from cetral one
+        :param add_paddings: pad (replicate) frames at the beginning *_contex times
+        :return: nparrray with spliced frames around central frame
+        """
+        super(SpliceFrames, self).__init__(act_on_sources)
+        self._left_context = left_context
+        self._right_context = right_context
+        self._add_paddings = add_paddings
+
+        assert self._left_context >= 0 and self._right_context >= 0
+
+    def apply(self, xy):
+
+        if (self._left_context + self._right_context)<1:
+            return xy
+
+        data = list(xy)
+        x = data[0]
+
+        if x.ndim == 2:
+            rval_x = self.__splice_single_channel(x)
+        elif x.ndim == 4: #Input from ReshapeAudioChannels, splice each of the channels separately
+
+            #print 'SpliceFrames x shape', x.shape
+
+            bs, channels, one, fs = x.shape
+
+            tmprval = self.__splice_single_channel(x[:,0,0,:].reshape(bs,fs))
+            feats_in_channel = tmprval.shape[1]
+
+            rval = numpy.zeros((bs, channels, 1, feats_in_channel), dtype=theano.config.floatX)
+            rval[:,0,0,:] = tmprval
+            for c in xrange(1, channels):
+                rval[:,c,0,:] = self.__splice_single_channel(x[:,c,0,:].reshape(bs,fs))
+
+            #print 'SpliceFrames rval shape', rval.shape
+
+            rval_x = rval
+        else:
+            raise Exception('SpliceFrames: expected tensor of length 2 or 4, got %i.'%len(x.shape))
+
+        data[0] = rval_x
+
+        return tuple(data)
+
+    def __splice_single_channel(self, x):
+
+        assert len(x.shape)==2, (
+            "Frame splicing implemented only for 2D matrices."
+        )
+
+        num_examples, dim = x.shape
+        ctx_win = numpy.arange((self._left_context+self._right_context+1) * dim)
+        examples = numpy.arange(num_examples) * dim
+        indexes  = examples[:, numpy.newaxis] + ctx_win[numpy.newaxis, :]
+
+        inputs = x.flatten()
+        if (self._add_paddings):
+            padd_beg = numpy.tile(inputs[0:dim], self._left_context)
+            padd_end = numpy.tile(inputs[-dim:], self._right_context)
+            inputs = numpy.concatenate((padd_beg, inputs, padd_end))
+
+        return numpy.asarray(inputs[indexes], dtype=numpy.float32)
+
+    def get_pre_data_spec(self):
+        return NotImplementedError('This is abstract class which did not implement data_specs')
+
+    def get_post_data_spec(self):
+        return NotImplementedError('This is abstract class which did not implement data_specs')
+
+
 class CMVNNormaliser(OnlinePreprocessor):
-    def __init__(self, mean, stdev, var_floor=0.01, norm_vars=True):
-        
+    def __init__(self, mean,
+                 stdev,
+                 act_on_sources='features',
+                 var_floor=0.01,
+                 norm_vars=True):
+
+        super(CMVNNormaliser, self).__init__(act_on_sources)
         self.mean = mean
         self.stdev = stdev
         self.var_floor = var_floor
         self.norm_vars = norm_vars
-        
+
         assert var_floor > 0 and self.stdev > var_floor
         
     def apply(self, xy):
@@ -42,6 +141,13 @@ class CMVNNormaliser(OnlinePreprocessor):
             rval /= self.stdev
         return (rval, y)
 
+    def get_pre_data_spec(self):
+        return NotImplementedError('This is abstract class which did not implement data_specs')
+
+    def get_post_data_spec(self):
+        return NotImplementedError('This is abstract class which did not implement data_specs')
+
+
 class ReshapeAudioChannels(OnlinePreprocessor):
     """
     Should be called *before* SpliceFeats so splicing will be performed for each channel separately
@@ -49,7 +155,8 @@ class ReshapeAudioChannels(OnlinePreprocessor):
     this is the most convenient way to do this and keep compatibility with Kaldi and also with pylearn2 MultiStreamKaldi... speech provider 
     This preprocessor reshapes the minibatches from (bs, feats_channels) to (bs, channels, 1, feats) which is compatible with desired output
     """
-    def __init__(self, num_input_channels):
+    def __init__(self, num_input_channels, act_on_sources='features'):
+        super(ReshapeAudioChannels, self).__init__(act_on_sources)
         self._num_input_channels = num_input_channels
         assert self._num_input_channels >= 1
         
@@ -75,77 +182,24 @@ class ReshapeAudioChannels(OnlinePreprocessor):
         
         return (rval, y)
 
-class SpliceFrames(OnlinePreprocessor):
-    def __init__(self, left_context=4, right_context=4, add_paddings=True):
-        """
-        :param left_context: number of frames on the left from central one
-        :param right_context: number of frames on the right from cetral one
-        :param add_paddings: pad (replicate) frames at the beginning *_contex times
-        :return: nparrray with spliced frames around central frame
-        """
-        self._left_context = left_context
-        self._right_context = right_context
-        self._add_paddings = add_paddings
-        
-        assert self._left_context>=0 and self._right_context>=0
-        
-    def apply(self, xy):
+    def get_pre_data_spec(self):
+        return NotImplementedError('This is abstract class which did not implement data_specs')
 
-        if (self._left_context + self._right_context)<1:
-            return xy;
+    def get_post_data_spec(self):
+        return NotImplementedError('This is abstract class which did not implement data_specs')
 
-        x, y = xy
-
-        if len(x.shape) == 2:
-            return (self.__splice_single_channel(x), y)
-        elif len(x.shape) == 4: #Input from ReshapeAudioChannels, splice each of the channels separately
-            
-            #print 'SpliceFrames x shape', x.shape
-            
-            bs, channels, one, fs = x.shape
-            
-            tmprval = self.__splice_single_channel(x[:,0,0,:].reshape(bs,fs))
-            feats_in_channel = tmprval.shape[1]
-            
-            rval = numpy.zeros((bs, channels, 1, feats_in_channel), dtype=theano.config.floatX)
-            rval[:,0,0,:] = tmprval
-            for c in xrange(1, channels):
-                rval[:,c,0,:] = self.__splice_single_channel(x[:,c,0,:].reshape(bs,fs))
-            
-            #print 'SpliceFrames rval shape', rval.shape
-            
-            return (rval, y)
-        else:
-            raise Exception('SpliceFrames: expected tensor of length 2 or 4, got %i.'%len(x.shape))
-        
-    def __splice_single_channel(self, x):
-        
-        assert len(x.shape)==2, (
-            "Frame splicing implemented only for 2D matrices."
-        )
-        
-        num_examples, dim = x.shape
-        ctx_win = numpy.arange((self._left_context+self._right_context+1) * dim)
-        examples = numpy.arange(num_examples) * dim
-        indexes  = examples[:, numpy.newaxis] + ctx_win[numpy.newaxis, :]
-        
-        inputs = x.flatten()
-        if (self._add_paddings):
-            padd_beg = numpy.tile(inputs[0:dim], self._left_context)
-            padd_end = numpy.tile(inputs[-dim:], self._right_context)
-            inputs = numpy.concatenate((padd_beg, inputs, padd_end))
-    
-        return numpy.asarray(inputs[indexes], dtype=numpy.float32)
 
 class FilterFrames(OnlinePreprocessor):
     """The preprocessor allows to remove or limit certain classes
     from training, i.e. limit the number of silence frames in adaptation
     """
-    def __init__(self, exclude_list=[], ratio=1.0):
+    def __init__(self, exclude_list=[], ratio=1.0, act_on_sources=None):
         """
         exclude_list: id of classess one want to remove from minibatches
         ratio: remove 1/ratio datapoints describing certain classes from training
         """
+
+        super(FilterFrames, self).__init__(act_on_sources)
         self.exclude_list = exclude_list
         self.ratio = ratio
 
@@ -158,13 +212,27 @@ class FilterFrames(OnlinePreprocessor):
             return xy
         return xy
 
+    def get_pre_data_spec(self):
+        return NotImplementedError('This is abstract class which did not implement data_specs')
+
+    def get_post_data_spec(self):
+        return NotImplementedError('This is abstract class which did not implement data_specs')
+
+
 class ReorderByBands(OnlinePreprocessor):
     """
     WRITEME
     1) Apply this preprocessor *after* splicing
     """
-    def __init__(self, num_bands, context_window, axes=('b','c',0,1), tied_deltas=False, tied_channels=True, reshape_stride_for_1D=-1):
-        
+    def __init__(self, num_bands,
+                 context_window,
+                 act_on_sources='features',
+                 axes=('b','c',0,1),
+                 tied_deltas=False,
+                 tied_channels=True,
+                 reshape_stride_for_1D=-1):
+
+        super(ReorderByBands, self).__init__(act_on_sources)
         self.num_bands = num_bands
         self.context_window = context_window
         self.axes = axes
@@ -229,14 +297,26 @@ class ReorderByBands(OnlinePreprocessor):
         #print 'ReorderByBands rval shape is ',rval.shape
         return (rval, y)
 
+    def get_pre_data_spec(self):
+        return NotImplementedError('This is abstract class which did not implement data_specs')
+
+    def get_post_data_spec(self):
+        return NotImplementedError('This is abstract class which did not implement data_specs')
+
 
 class ReorderByBandsPermute(OnlinePreprocessor):
     """
     WRITEME
     1) Apply this preprocessor *after* splicing
     """
-    def __init__(self, num_bands, context_window, axes=('b','c',0,1), tied_deltas=True, reshape_stride_for_1D=-1):
-        
+    def __init__(self, num_bands,
+                 context_window,
+                 act_on_sources='features',
+                 axes=('b','c',0,1),
+                 tied_deltas=True,
+                 reshape_stride_for_1D=-1):
+
+        super(ReorderByBandsPermute, self).__init__(act_on_sources)
         self.num_bands = num_bands
         self.context_window = context_window
         self.axes = axes
@@ -307,6 +387,13 @@ class ReorderByBandsPermute(OnlinePreprocessor):
             for i in xrange(band_size):
                 permute[idx[i],i+k*band_size] = 1     
         return permute
+
+    def get_pre_data_spec(self):
+        return NotImplementedError('This is abstract class which did not implement data_specs')
+
+    def get_post_data_spec(self):
+        return NotImplementedError('This is abstract class which did not implement data_specs')
+
 
 class SpliceChannels(OnlinePreprocessor):
     def __init__(self):

@@ -3,6 +3,7 @@ import time
 import thread
 import sys
 import numpy
+import logging
 
 from Queue import Empty as QueueEmptyException
 from Queue import Full as QueueFullException
@@ -20,7 +21,7 @@ elif PYLEARN2_LOADING_MODE == QUEUE_PROCESSES:
     from multiprocessing import Queue
 assert PYLEARN2_LOADING_MODE != None
 
-from pylearn2.datasets.speech_utils.providers import BufferedProvider
+from pylearn2.datasets.speech_utils.providers import BufferedProvider, BufferedProviderDataSpec
 
 
 class QueueCacheLastElem(object):
@@ -31,17 +32,16 @@ class QueueCacheLastElem(object):
 
 
 class Pylearn2Cache(PYLEARN2_LOADING_MODE):
-    def __init__(self, queue, provider, batch_size, num_classes, preprocessor=None):
+    def __init__(self, queue, provider, batch_size, preprocessor=None):
         super(Pylearn2Cache, self).__init__()
         self.queue = queue
         self.batch_size = batch_size
         self.provider = provider
         self.preprocessor = preprocessor
-        self.num_classes = num_classes
         self.deamon = True
 
     def run(self):
-        pass
+        raise NotImplementedError('Abstract class, not supposed to be run.')
 
     @staticmethod
     def make_queue(maxsize=5):
@@ -49,30 +49,45 @@ class Pylearn2Cache(PYLEARN2_LOADING_MODE):
 
 
 class Pylearn2CacheSimple(Pylearn2Cache):
-    def __init__(self, queue, provider, batch_size, num_classes, Y_as_tuple=False, preprocessor=None,
+    def __init__(self,
+                 queue,
+                 provider,
+                 batch_size,
+                 preprocessor=None,
                  frame_shuffling_window=None):
-        super(Pylearn2CacheSimple, self).__init__(queue, provider, batch_size, num_classes, preprocessor)
-        self.provider = BufferedProvider(provider, batch_size)
+
+        super(Pylearn2CacheSimple, self).__init__(queue=queue,
+                                                  provider=provider,
+                                                  batch_size=batch_size,
+                                                  preprocessor=preprocessor)
+
+        self.provider = BufferedProviderDataSpec(provider, batch_size)
         self.frame_shuffling_window = frame_shuffling_window
         self.lfreq = 2 ** 20  # print progress/efficiency stats after 1M examples
-        self.Y_as_tuple = Y_as_tuple
+        self.num_classes = self.provider.num_classes()
 
     def run(self):
+
         tstart = time.time()
         texamples = 0
-        # supervised = (not isinstance (self.provider, pylearn2.datasets.speech_utils.kaldi_providers.KaldiFeatsProviderUtt))
-        for item in self.provider:
+
+        for data in self.provider:
             # TODO: do this working in both supervised and unsupervised modes
-            X, y = item
-            if X is None or y is None:
+
+            if any([space is None for space in data]):
                 continue
 
-            xy = item
-
-            if self.preprocessor != None:
+            xy = data
+            if self.preprocessor is not None:
                 xy = self.preprocessor.apply(xy)
 
-            data, y = xy
+            xy = list(xy)
+
+            if len(xy) > 2:
+                data = xy[0]
+                y = xy[1:]
+            else:
+                data, y = xy
 
             if isinstance(y, (list, tuple)):
                 assert isinstance(self.num_classes, (list, tuple)) and \
@@ -84,30 +99,12 @@ class Pylearn2CacheSimple(Pylearn2Cache):
                 )
                 rval_y = [self.convert_to_one_hot(yel, self.num_classes[idx], 0) \
                           for yel, idx in zip(y, xrange(len(y)))]
-                if self.Y_as_tuple is True:
-                    new_y = tuple(rval_y)
-                else:
-                    new_y = numpy.concatenate(rval_y, axis=1)
-            elif isinstance(y, (numpy.ndarray, numpy.generic)) and y.ndim>1:
-                assert isinstance(self.num_classes, (list, tuple)) and \
-                       y.shape[1] == len(self.num_classes), (
-                    "Specified %i labels streams but provided " \
-                    " only %i target dimensions. Specify n_classes" \
-                    " as a list with one element per target stream." \
-                    % (y.shape[1], len(self.num_classes))
-                )
-                rval_y=[]
-                for idx in xrange(y.shape[1]):
-                    rval_y.append(self.convert_to_one_hot(y[:,idx], self.num_classes[idx], 0))
-
-                if self.Y_as_tuple is True:
-                    new_y = tuple(rval_y)
-                else:
-                    new_y = numpy.concatenate(rval_y, axis=1)
+                new_y = tuple(rval_y)
             else:
-                new_y = self.convert_to_one_hot(y, self.num_classes[0], 0)
+                rval_y = self.convert_to_one_hot(y, self.num_classes[0], 0)
+                new_y = tuple([rval_y])
 
-            rval = (data, new_y)
+            rval = (data,) + new_y
 
             texamples += self.provider.batch_size
             if texamples % self.lfreq == 0:
