@@ -19,6 +19,7 @@ from pylearn2.space import CompositeSpace, Conv2DSpace, VectorSpace
 
 log = logging.getLogger(__name__)
 
+
 def read_kaldi_matrix(buffer):
     descr = struct.unpack('<xcccc', buffer.read(5))  # read 0B{F,D}{V,M,C}[space], function tested for 0BFM types only
 
@@ -151,7 +152,7 @@ class KaldiFeatsProviderUtt(ListDataProvider):
         self.max_utt = max_utt
         self.randomize = randomize
         self.template_shell_command = (
-                    Template(template_shell_command) if (template_shell_command != None) else None)
+            Template(template_shell_command) if (template_shell_command != None) else None)
         self.feats_dim = feats_dim
         if self.randomize is True:
             random.shuffle(self.files_list)
@@ -243,16 +244,35 @@ class KaldiAlignFeatsProviderUtt(KaldiFeatsProviderUtt):
         self.utt_skipped = 0
         self._num_examples = 0
 
-        self.files_info = {}
+        files_info = {}
         for scp_entry in self.files_list:
             [utt, path] = scp_entry.split(' ', 1)
-            self.files_info[utt] = scp_entry
+            files_info[utt] = scp_entry
 
         try:
-            self.align_info, self._num_examples, self._num_classes = \
+            align_info, num_examples, num_classes = \
                 read_kaldi_aligns(aligns_scp)
         except IOError as e:
             raise e
+
+        fi_set = set(files_info.keys())
+        ai_set = set(align_info.keys())
+        iset = set.intersection(fi_set, ai_set)
+
+        self.files_info, self.align_info = {}, {}
+        for k in iset:
+            self.files_info[k] = files_info[k]
+            self.align_info[k] = align_info[k]
+
+        assert len(self.align_info) == len(self.files_info)
+
+        log.warning("Loaded %i feature files, %i associated alignments" \
+                    % (len(files_info), len(align_info)))
+        log.warning("The intersection of those give in total %i "
+                    "training examples." % (len(self.files_info)))
+        log.warning("Num of classes found in alignemnts is %i." % (num_classes))
+
+        self._num_examples = num_examples
 
         # when asked only subset of data, limit the lists here (given they are large enough at first place)
         if 0 < max_time < (self._num_examples * self._frame_shift_in_sec):
@@ -262,13 +282,13 @@ class KaldiAlignFeatsProviderUtt(KaldiFeatsProviderUtt):
             new_files_list = []
             examples_loaded, idx = 0, 0
             while examples_loaded * self._frame_shift_in_sec < max_time:
-                scp_entry = self.files_list[idx];
-                idx += 1;
+                scp_entry = self.files_list[idx]
+                idx += 1
                 [utt, path] = scp_entry.split(' ', 1)
                 if utt not in self.align_info:
                     continue
                 new_files_list.append(scp_entry)
-                new_aligns_info[utt] = self.align_info[utt];
+                new_aligns_info[utt] = self.align_info[utt]
                 examples_loaded += new_aligns_info[utt].shape[0]
 
             # alter variables w.r.t new timings
@@ -283,12 +303,15 @@ class KaldiAlignFeatsProviderUtt(KaldiFeatsProviderUtt):
         targets_space = VectorSpace(dim=self.targets_dim)
         self.data_spec = (CompositeSpace((feats_space, targets_space)), ('features', 'targets'))
 
+
     def __iter__(self):
         return self
+
 
     def reset(self):
         super(KaldiAlignFeatsProviderUtt, self).reset()
         self.utt_skipped = 0
+
 
     def next(self):
         if (self.index >= self.list_size) or (self.max_utt > 0 and self.index >= self.max_utt):
@@ -403,7 +426,7 @@ class CICDKaldiAlignFeatsProviderUtt(KaldiFeatsProviderUtt):
 
         log.warning("Loaded %i feature files, %i context-dependent and %i monophone alignemts" \
                     % (len(files_info), len(align_info_cd), len(align_info_m)))
-        log.warning("The intersection of those give in total %i training elements" % (len(self.files_info)))
+        log.warning("The intersection of those give in total %i training examples" % (len(self.files_info)))
         log.warning("Num of classes is %i (cd) and %i (m) " \
                     % (num_classes_cd, num_classes_m))
 

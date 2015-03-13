@@ -134,6 +134,143 @@ class Cost(object):
                                   "get_data_specs.")
 
 
+
+class CostCDCI(Cost):
+    """
+    The customised cost for softmax layer with auxliliary task
+    """
+    def __init__(self, coeff_cd, coeff_ci, zero_ci_grad_for_cd=True):
+        self.coeff_cd = coeff_cd
+        self.coeff_ci = coeff_ci
+        self.zero_ci_grad_for_cd = zero_ci_grad_for_cd
+
+    def expr(self, model, data, ** kwargs):
+        """
+        Returns the sum of the costs the SumOfCosts instance was given at
+        initialization.
+
+        Parameters
+        ----------
+        model : pylearn2.models.model.Model
+            the model for which we want to calculate the sum of costs
+        data : flat tuple of tensor_like variables.
+            data has to follow the format defined by self.get_data_specs(),
+            but this format will always be a flat tuple.
+        """
+        cost_cd, cost_ci = model.cost_from_X(data)
+        sum_of_costs = self.coeff_cd*cost_cd + self.coeff_ci*cost_ci
+
+        return sum_of_costs, cost_cd, cost_ci
+
+    def get_composite_data_specs(self, model):
+        """
+        Build and return a composite data_specs of all costs.
+
+        The returned space is a CompositeSpace, where the components are
+        the spaces of each of self.costs, in the same order. The returned
+        source is a tuple of the corresponding sources.
+        """
+        raise NotImplementedError(str(type(self))+" does not implement " +
+                                  "get_composite_data_specs.")
+
+    def get_composite_specs_and_mapping(self, model):
+        """
+        Build the composite data_specs and a mapping to flatten it, return both
+
+        Build the composite data_specs described in `get_composite_specs`,
+        and build a DataSpecsMapping that can convert between it and a flat
+        equivalent version. In particular, it helps building a flat data_specs
+        to request data, and nesting this data back to the composite data_specs,
+        so it can be dispatched among the different sub-costs.
+
+        This is a helper function used by `get_data_specs` and `get_gradients`,
+        and possibly other methods.
+        """
+        raise NotImplementedError(str(type(self))+" does not implement " +
+                                  "get_composite_specs_and_mapping.")
+
+    def get_data_specs(self, model):
+        """
+        Get a flat data_specs containing all information for all sub-costs.
+
+        This data_specs should be non-redundant. It is built by flattening
+        the composite data_specs returned by `get_composite_specs`.
+
+        This is the format that SumOfCosts will request its data in. Then,
+        this flat data tuple will be nested into the composite data_specs,
+        in order to dispatch it among the different sub-costs.
+        """
+        raise NotImplementedError(str(type(self))+" does not implement " +
+                                  "get_data_specs.")
+
+    def get_gradients(self, model, data, ** kwargs):
+        indiv_results = []
+
+        sum_of_costs, cost_cd, cost_ci = self.expr(model=model, data=data, **kwargs)
+
+        params = list(model.get_params())
+
+        grads_cd = T.grad(cost_cd, params, disconnected_inputs = 'ignore')
+        grads_ci = T.grad(cost_ci, params, disconnected_inputs = 'ignore')
+
+        gradients_cd = OrderedDict(izip(params, grads_cd))
+        gradients_ci = OrderedDict(izip(params, grads_ci))
+
+        indiv_results.append((gradients_cd, OrderedDict()))
+        indiv_results.append((gradients_ci, OrderedDict()))
+
+        grads = OrderedDict()
+        updates = OrderedDict()
+        params = model.get_params()
+
+        for coeff, packed in zip(self.coeffs, indiv_results):
+            g, u = packed
+            for param in g:
+                if param not in params:
+                    raise ValueError("A shared variable ("+str(param)+") that is not a parameter appeared in a cost gradient dictionary.")
+            for param in g:
+                assert param.ndim == g[param].ndim
+                v = coeff * g[param]
+                if param not in grads:
+                    grads[param] = v
+                else:
+                    grads[param] = grads[param] + v
+                assert grads[param].ndim == param.ndim
+            assert not any([state in updates for state in u])
+            assert not any([state in params for state in u])
+            updates.update(u)
+
+        return grads, updates
+
+    def get_monitoring_channels(self, model, data, ** kwargs):
+        self.get_data_specs(model)[0].validate(data)
+        rval = OrderedDict()
+        composite_specs, mapping = self.get_composite_specs_and_mapping(model)
+        nested_data = mapping.nest(data)
+
+        for i, cost in enumerate(self.costs):
+            cost_data = nested_data[i]
+            try:
+                rval.update(cost.get_monitoring_channels(model, cost_data, **kwargs))
+            except TypeError:
+                print 'SumOfCosts.get_monitoring_channels encountered TypeError while calling ' \
+                        + str(type(cost))+'.get_monitoring_channels'
+                raise
+
+            value = cost.expr(model, cost_data, ** kwargs)
+            if value is not None:
+                name = ''
+                if hasattr(value, 'name') and value.name is not None:
+                    name = '_' + value.name
+                rval['term_'+str(i)+name] = value
+
+        return rval
+
+    def get_fixed_var_descr(self, model, data):
+        self.get_data_specs(model)[0].validate(data)
+        return FixedVarDescr()
+
+
 class SumOfCosts(Cost):
     """
     Combines multiple costs by summing them.

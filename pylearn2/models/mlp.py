@@ -1274,7 +1274,9 @@ class CICDSoftmax(Layer):
                  cd_n_classes,
                  ci_n_classes,
                  prediction_mode=False,
+                 ci_to_cd_nonlinearity=None,
                  ci_cost_scaler=0.3,
+                 costs_as_tuple=False,
                  irange=None,
                  istdev=None,
                  sparse_init=None,
@@ -1301,6 +1303,8 @@ class CICDSoftmax(Layer):
         if isinstance(M_lr_scale, str):
             M_lr_scale = float(M_lr_scale)
 
+        assert ci_to_cd_nonlinearity in ['softmax', 'sigmoid', 'relu', None]
+
         self.__dict__.update(locals())
         del self.self
 
@@ -1315,7 +1319,7 @@ class CICDSoftmax(Layer):
 
     def get_target_source(self):
         if self.prediction_mode:
-            return 'targets_cd'
+            return 'targets'
         else:
             return 'targets_cd', 'targets_ci'
 
@@ -1435,6 +1439,24 @@ class CICDSoftmax(Layer):
                 misclass = T.cast(misclass, config.floatX)
                 rval['misclass_ci'] = misclass
                 rval['nll_ci'] = self._cost_partial(Y_hat=state_ci, Y=target_ci)
+        else:
+
+            mx_cd = state.max(axis=1)
+
+            rval =  OrderedDict([
+                ('cd_mean_max_class' , mx_cd.mean()),
+                ('cd_max_max_class' , mx_cd.max()),
+                ('cd_min_max_class' , mx_cd.min()),
+            ])
+
+            if target is not None:
+
+                y_hat_cd = T.argmax(state, axis=1)
+                y_cd = T.argmax(target, axis=1)
+                misclass = T.neq(y_cd, y_hat_cd).mean()
+                misclass = T.cast(misclass, config.floatX)
+                rval['misclass'] = misclass
+                rval['nll'] = self._cost_partial(Y_hat=state, Y=target)
 
         return rval
 
@@ -1527,14 +1549,26 @@ class CICDSoftmax(Layer):
         m = self.m
 
         M = T.dot(state_below, self.M) + m
-        Z = T.dot(state_below, self.W) + T.dot(M, self.C) + b
 
+        if self.ci_to_cd_nonlinearity == 'softmax':
+            MO = T.nnet.softmax(M)
+        elif self.ci_to_cd_nonlinearity == 'sigmoid':
+            MO = T.nnet.sigmoid(M)
+        elif self.ci_to_cd_nonlinearity == 'relu':
+            MO = T.maximum(0, M)
+        else:
+            MO = M
+
+        Z = T.dot(state_below, self.W) + T.dot(MO, self.C) + b
         rval_cd = T.nnet.softmax(Z)
 
         if self.prediction_mode is True:
             return rval_cd
         else:
-            rval_m = T.nnet.softmax(M)
+            if self.ci_to_cd_nonlinearity == 'softmax':
+                rval_m = MO
+            else:
+                rval_m = T.nnet.softmax(M)
             return rval_cd, rval_m
 
     def cost(self, Y, Y_hat):
@@ -1544,18 +1578,28 @@ class CICDSoftmax(Layer):
         distribution.
         """
 
-        assert self.prediction_mode is False, (
-            "You need to set prediction_mode to false for training"
-        )
+        if self.prediction_mode:
 
-        Y_cd, Y_ci = Y
-        Y_hat_cd, Y_hat_ci = Y_hat
-        rval_cd = self._cost_partial(Y_cd, Y_hat_cd)
-        rval_ci = self._cost_partial(Y_ci, Y_hat_ci)
+            #this is for testing purposes, training
+            #in pred mode simplifies this to single task
+            #mutli-class prediction
+            rval = self._cost_partial(Y, Y_hat)
+            return -rval
+        else:
 
-        rval = (1-self.ci_cost_scaler)*rval_cd + self.ci_cost_scaler*rval_ci
+            Y_cd, Y_ci = Y
+            Y_hat_cd, Y_hat_ci = Y_hat
 
-        return -rval
+            rval_cd = self._cost_partial(Y_cd, Y_hat_cd)
+            rval_ci = self._cost_partial(Y_ci, Y_hat_ci)
+
+            if self.costs_as_tuple:
+                rval = (-rval_cd, -rval_ci)
+                return rval
+            else:
+                rval = (1-self.ci_cost_scaler)*rval_cd \
+                       + self.ci_cost_scaler*rval_ci
+                return -rval
 
     def _cost_partial(self, Y, Y_hat):
 
