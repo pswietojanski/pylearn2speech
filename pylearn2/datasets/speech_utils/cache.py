@@ -22,7 +22,7 @@ elif PYLEARN2_LOADING_MODE == QUEUE_PROCESSES:
 assert PYLEARN2_LOADING_MODE != None
 
 from pylearn2.datasets.speech_utils.providers import BufferedProvider, BufferedProviderDataSpec
-
+from pylearn2.datasets.preprocessing_speech import PipelineOnlinePreprocessor, SpliceFrames
 
 class QueueCacheLastElem(object):
     """Special class denoting when StopIteration exception should be raised in Queue-based dataset interfaces."""
@@ -53,16 +53,17 @@ class Pylearn2CacheSimple(Pylearn2Cache):
                  queue,
                  provider,
                  batch_size,
-                 preprocessor=None,
-                 frame_shuffling_window=None):
+                 preprocessor=None):
 
-        super(Pylearn2CacheSimple, self).__init__(queue=queue,
-                                                  provider=provider,
-                                                  batch_size=batch_size,
-                                                  preprocessor=preprocessor)
+        super(Pylearn2CacheSimple, self).\
+            __init__(queue=queue,
+                     provider=provider,
+                     batch_size=batch_size,
+                     preprocessor=preprocessor)
 
+        #TODO: add here an assert for SpliceFrames preprocessor in case
+        #provider is utt based, not random...
         self.provider = BufferedProviderDataSpec(provider, batch_size)
-        self.frame_shuffling_window = frame_shuffling_window
         self.lfreq = 2 ** 20  # print progress/efficiency stats after 1M examples
         self.num_classes = self.provider.num_classes()
 
@@ -124,15 +125,6 @@ class Pylearn2CacheSimple(Pylearn2Cache):
         self.queue.put(QueueCacheLastElem(), block=True)  # all data has been loaded
         print 'Pylearn2CacheSimple : Consuming the entire set %i examples took %f minutes which gives ca. %f pres/second.' % (
             texamples, ttime / 60., texamples / ttime)
-
-    def frame_shuffler(self, (data, y)):
-        assert len(data) == len(y)
-        rng_state = numpy.random.get_state()
-        numpy.random.shuffle(data)
-        numpy.random.set_state(rng_state)
-        numpy.random.shuffle(y)
-
-        return (data, y)
 
     def convert_to_one_hot(self, y, max_classes, min_class=0):
 

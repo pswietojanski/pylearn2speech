@@ -34,7 +34,7 @@ def read_kaldi_matrix(buffer):
     elif (repr_type == 'D'):
         dtype = numpy.dtype(numpy.float64)
     else:
-        raise Exception('Wrong representation type in Kaldi header (is feats '
+        raise ValueError('Wrong representation type in Kaldi header (is feats '
                         'compression enabled? - this is not supported in the '
                         'current version. Feel free to add this functionality.): %c' % (repr_type))
 
@@ -194,7 +194,7 @@ class KaldiFeatsProviderUtt(ListDataProvider):
 
         features = read_kaldi_matrix(StringIO(buffer_tuple[0]))
 
-        return features
+        return (features,)
 
     @property
     def num_examples(self):
@@ -230,16 +230,19 @@ class KaldiAlignFeatsProviderUtt(KaldiFeatsProviderUtt):
         :param max_utt:
         :param frame_shift:
         :param mapped:
-        :return:
+        :return: a tuple (features, targets) for a given utterance
         """
 
-        super(KaldiAlignFeatsProviderUtt, self).__init__(feats_scp=feats_scp,
-                                                         feats_dim=feats_dim,
-                                                         template_shell_command=template_shell_command,
-                                                         randomize=randomize,
-                                                         max_utt=max_utt)
+        super(KaldiAlignFeatsProviderUtt, self).\
+            __init__(feats_scp=feats_scp,
+                    feats_dim=feats_dim,
+                    template_shell_command=template_shell_command,
+                    randomize=randomize,
+                    max_utt=max_utt)
+
         self.frame_shift = frame_shift
         self.targets_dim = targets_dim
+        self.mapped = mapped
         self._frame_shift_in_sec = self.frame_shift / 1000.0
         self.utt_skipped = 0
         self._num_examples = 0
@@ -259,22 +262,29 @@ class KaldiAlignFeatsProviderUtt(KaldiFeatsProviderUtt):
         ai_set = set(align_info.keys())
         iset = set.intersection(fi_set, ai_set)
 
+        #monophones in Kaldi are indexed from 1, mapp
+        # this to 0-based indexing
+        mapping = 0
+        if self.mapped:
+            log.warning("Mapping indexing from 1-based to 0-based (Kaldi monophones)")
+            mapping = 1
+
         self.files_info, self.align_info = {}, {}
         for k in iset:
             self.files_info[k] = files_info[k]
-            self.align_info[k] = align_info[k]
+            self.align_info[k] = align_info[k] - mapping
 
         assert len(self.align_info) == len(self.files_info)
+        self._num_examples = self._recount_examples(self.align_info)
 
-        log.warning("Loaded %i feature files, %i associated alignments" \
+        log.warning("Loaded %i feature files and %i associated alignments" \
                     % (len(files_info), len(align_info)))
         log.warning("The intersection of those give in total %i "
-                    "training examples." % (len(self.files_info)))
-        log.warning("Num of classes found in alignemnts is %i." % (num_classes))
-
-        self._num_examples = num_examples
+                    "data-points." % self._num_examples)
+        log.warning("Num of classes found in alignemnts is %i." % num_classes)
 
         # when asked only subset of data, limit the lists here (given they are large enough at first place)
+        # and update corresponding statistics
         if 0 < max_time < (self._num_examples * self._frame_shift_in_sec):
             log.warning('Limiting subset to %d seconds' % max_time)
             self.randomize = False
@@ -297,21 +307,22 @@ class KaldiAlignFeatsProviderUtt(KaldiFeatsProviderUtt):
             self.list_size = len(self.files_list)
             self._num_examples = examples_loaded  # to make Trainer happy it showed all examples it supposed to
 
-        self.mapped = mapped
-
         feats_space = VectorSpace(dim=self.feats_dim)
         targets_space = VectorSpace(dim=self.targets_dim)
         self.data_spec = (CompositeSpace((feats_space, targets_space)), ('features', 'targets'))
 
+    def _recount_examples(self, align_info):
+        num_examples = 0
+        for align in align_info.keys():
+            num_examples += numpy.prod(align_info[align].shape)
+        return num_examples
 
     def __iter__(self):
         return self
 
-
     def reset(self):
         super(KaldiAlignFeatsProviderUtt, self).reset()
         self.utt_skipped = 0
-
 
     def next(self):
         if (self.index >= self.list_size) or (self.max_utt > 0 and self.index >= self.max_utt):
@@ -349,9 +360,6 @@ class KaldiAlignFeatsProviderUtt(KaldiFeatsProviderUtt):
             self.utt_skipped += 1
             return features, None
 
-        if self.mapped:
-            labels -= 1
-
         return features, labels
 
     def num_classes(self):
@@ -360,6 +368,89 @@ class KaldiAlignFeatsProviderUtt(KaldiFeatsProviderUtt):
     @property
     def num_examples(self):
         return self._num_examples
+
+    def get_data_specs(self):
+        return self.data_spec
+
+
+class FrameShuffler(object):
+    def __init__(self,
+                 utt_provider,
+                 shuffling_window=2**15,
+                 splice_preprocessor=None):
+
+        self.utt_provider = utt_provider
+        self.shuffling_window = shuffling_window
+        self.splice_preprocessor = splice_preprocessor
+        self.finished = False
+
+        self.data_specs = self.utt_provider.get_data_specs()
+        self.num_sources = len(self.data_specs[1])
+
+    def reset(self):
+        self.utt_provider.reset()
+        self.finished = False
+
+    def __iter__(self):
+        return self
+
+    def next(self):
+
+        if self.finished:
+            raise StopIteration
+
+        try:
+            buffer = None
+            num_frames_read = 0
+            while num_frames_read <= self.shuffling_window:
+                utt = self.utt_provider.next()
+                assert isinstance(utt, (tuple, list)) and\
+                       len(utt) == self.num_sources, (
+                    "Expected to get an data-point as an iterable"
+                    " tuple or list following data specs, but got %s" % str(type(utt))
+                )
+                #filter out possible Nones here
+                if any(u is None for u in utt):
+                    continue
+                num_frames_read += utt[0].shape[0]
+                buffer.append(utt)
+        except StopIteration:
+            self.finished = True
+
+        #convert from [(x1,y1,..), (x2,y2,...),...] to
+        # [(x1,x2,...),(y1,y2,...)...]
+        to_shuffling = zip(*buffer)
+        assert len(to_shuffling) == self.num_sources, (
+            "Unzipped list of unexpected length %i instead of %i spaces." % \
+                    (len(to_shuffling), len(self.num_sources))
+        )
+
+        shuffled=[]
+        rng_state = numpy.random.get_state()
+        for i, u in enumerate(to_shuffling):
+            space_data = numpy.concatenate(u, axis=0)
+
+            #if true, splice frames before shuffling
+            if i == 0 and self.splice_preprocessor is not None:
+                assert self.data_specs[1][0] == 'features', (
+                    "Expected to read splice data space 'features'"
+                    " but got %s " % self.data_specs[1][0]
+                )
+                space_data = self.splice_preprocessor(space_data)
+
+            numpy.random.set_state(rng_state)
+            numpy.random.shuffle(space_data)
+            shuffled.append(space_data)
+        rval = zip(*shuffled)
+
+        return tuple(rval)
+
+    def num_classes(self):
+        return self.utt_provider.num_classes()
+
+    @property
+    def num_examples(self):
+        return self.utt_provider.num_examples
 
     def get_data_specs(self):
         return self.data_spec
@@ -375,6 +466,7 @@ class CICDKaldiAlignFeatsProviderUtt(KaldiFeatsProviderUtt):
                  targets_ci_dim,
                  template_shell_command=None,
                  randomize=False,
+                 frame_shift=10,
                  max_utt=-1,
                  max_time=-1):
         """
@@ -397,7 +489,9 @@ class CICDKaldiAlignFeatsProviderUtt(KaldiFeatsProviderUtt):
 
         self.targets_cd_dim = targets_cd_dim
         self.targets_ci_dim = targets_ci_dim
-        self.utt_skipped = 0
+        self.frame_shift = frame_shift
+        self._frame_shift_in_sec = self.frame_shift / 1000.0
+        self._utt_skipped = 0
         self._num_examples = 0
 
         files_info = {}
@@ -422,20 +516,63 @@ class CICDKaldiAlignFeatsProviderUtt(KaldiFeatsProviderUtt):
         for k in iset:
             self.files_info[k] = files_info[k]
             self.align_info_cd[k] = align_info_cd[k]
-            self.align_info_m[k] = align_info_m[k]
+            self.align_info_m[k] = align_info_m[k] - 1 # convert monophones to 0-based indexing
+
+        self._num_examples = self._recount_examples(self.align_info_cd)
+        num_examples_m = self._recount_examples(self.align_info_m)
+
+        #assert self._num_examples == num_examples_m, (
+        #    "Number of training targets should be the same for both tasks" \
+        #    " while got %i for cd and %i for ci targets" % (self._num_examples, num_examples_m)
+        #)
 
         log.warning("Loaded %i feature files, %i context-dependent and %i monophone alignemts" \
                     % (len(files_info), len(align_info_cd), len(align_info_m)))
-        log.warning("The intersection of those give in total %i training examples" % (len(self.files_info)))
+        log.warning("The intersection of those give in total %i data-points." % self._num_examples)
         log.warning("Num of classes is %i (cd) and %i (m) " \
                     % (num_classes_cd, num_classes_m))
 
+        # when asked only subset of data, limit the lists here (given they are large enough at first place)
+        # and update corresponding statistics
+        if 0 < max_time < (self._num_examples * self._frame_shift_in_sec):
+            log.warning('Limiting subset to %d seconds' % max_time)
+            self.randomize = False
+            new_aligns_info_cd = {}
+            new_aligns_info_m = {}
+            new_files_list = []
+            examples_loaded, idx = 0, 0
+            while examples_loaded * self._frame_shift_in_sec < max_time:
+                scp_entry = self.files_list[idx]
+                idx += 1
+                [utt, path] = scp_entry.split(' ', 1)
+                if utt not in self.align_info_cd:
+                    continue
+                new_files_list.append(scp_entry)
+                new_aligns_info_cd[utt] = self.align_info_cd[utt]
+                new_aligns_info_m[utt] = self.align_info_m[utt]
+                examples_loaded += new_aligns_info_cd[utt].shape[0]
+
+            # alter variables w.r.t new timings
+            self.align_info_cd = new_aligns_info_cd
+            self.align_info_m = new_aligns_info_m
+            self.files_list = new_files_list
+            self.list_size = len(self.files_list)
+            self._num_examples = examples_loaded  # to make Trainer happy it showed all examples it supposed to
+
+            log.warning("Time limited data gives %i data-points." % self._num_examples)
+
         feats_space = VectorSpace(dim=self.feats_dim)
-        ci_space = VectorSpace(dim=self.targets_ci_dim)
         cd_space = VectorSpace(dim=self.targets_cd_dim)
-        space = CompositeSpace([feats_space, ci_space, cd_space])
+        ci_space = VectorSpace(dim=self.targets_ci_dim)
+        space = CompositeSpace([feats_space, cd_space, ci_space])
         source = ('features', 'targets_cd', 'targets_ci')
         self.data_spec = (space, source)
+
+    def _recount_examples(self, align_info):
+        num_examples = 0
+        for align in align_info.keys():
+            num_examples += numpy.prod(align_info[align].shape)
+        return num_examples
 
     def __iter__(self):
         return self
@@ -446,9 +583,9 @@ class CICDKaldiAlignFeatsProviderUtt(KaldiFeatsProviderUtt):
 
     def next(self):
         if (self.index >= self.list_size) or (self.max_utt > 0 and self.index >= self.max_utt):
-            if self.utt_skipped > 0:
+            if self._utt_skipped > 0:
                 log.warning('KaldiAlignFeatsProviderUtt: Skipped %i utterances out of %i' %
-                            (self.utt_skipped, len(self.files_list)))
+                            (self._utt_skipped, len(self.files_list)))
             raise StopIteration
 
         utt_path = self.files_list[self.index]
@@ -463,7 +600,7 @@ class CICDKaldiAlignFeatsProviderUtt(KaldiFeatsProviderUtt):
             features = read_ark_entry_from_archive(utt_path)
         except Exception as e:
             log.warning('Cannot load file: %s. Skipped', str(e))
-            self.utt_skipped += 1
+            self._utt_skipped += 1
 
         self.index += 1
 
@@ -478,8 +615,6 @@ class CICDKaldiAlignFeatsProviderUtt(KaldiFeatsProviderUtt):
             log.warning('Alignments for %s have %i frames while the utt has %i. Skipping' % \
                         (utt_path, labels_cd.shape[0], features.shape[0]))
             return none_tuple
-
-        labels_m -= 1  # monophones in Kaldi are indexed from 1
 
         return features, labels_cd, labels_m
 

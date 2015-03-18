@@ -120,7 +120,7 @@ class BufferedProvider(object):
 
                 try:
                     while num_frames_read < self.max_buf_elems * self.batch_size:
-                        result, utt = self.provider.next
+                        result, utt = self.provider.next()
                         if (result[0] is None) or (result[1] is None):
                             # print 'BufferedProvider: skipping %s'%utt
                             continue
@@ -158,7 +158,7 @@ class BufferedProviderDataSpec(object):
     def __init__(self, provider, batch_size):
         self.provider = provider
         self.batch_size = batch_size
-        self.max_buf_elems = 20
+        self.max_buf_elems = 5
         self.finished = False
         self.buffer = []
         self.buffer_tail = None

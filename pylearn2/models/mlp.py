@@ -1277,6 +1277,7 @@ class CICDSoftmax(Layer):
                  ci_to_cd_nonlinearity=None,
                  ci_cost_scaler=0.3,
                  costs_as_tuple=False,
+                 low_rank=None,
                  irange=None,
                  istdev=None,
                  sparse_init=None,
@@ -1303,7 +1304,16 @@ class CICDSoftmax(Layer):
         if isinstance(M_lr_scale, str):
             M_lr_scale = float(M_lr_scale)
 
-        assert ci_to_cd_nonlinearity in ['softmax', 'sigmoid', 'relu', None]
+        if isinstance(b_lr_scale, str):
+            b_lr_scale = float(b_lr_scale)
+
+        if isinstance(m_lr_scale, str):
+            m_lr_scale = float(m_lr_scale)
+
+        assert ci_to_cd_nonlinearity in ['softmax', 'sigmoid', 'relu', 'tanh', 'None', None]
+
+        if ci_to_cd_nonlinearity == 'None':
+            ci_to_cd_nonlinearity = None
 
         self.__dict__.update(locals())
         del self.self
@@ -1373,7 +1383,7 @@ class CICDSoftmax(Layer):
         M_col_norms = T.sqrt(sq_M.sum(axis=0))
 
         C = self.C
-        assert W.ndim == 2
+        assert C.ndim == 2
         sq_C = T.sqr(C)
         C_row_norms = T.sqrt(sq_C.sum(axis=1))
         C_col_norms = T.sqrt(sq_C.sum(axis=0))
@@ -1514,19 +1524,16 @@ class CICDSoftmax(Layer):
         return rval
 
     def get_weights(self):
-        if not isinstance(self.input_space, VectorSpace):
-            raise NotImplementedError()
-
-        return self.W.get_value()
+        raise NotImplementedError()
 
     def set_weights(self, weights):
-        self.W.set_value(weights)
+        raise NotImplementedError()
 
     def set_biases(self, biases):
-        self.b.set_value(biases)
+        raise NotImplementedError()
 
     def get_biases(self):
-        return self.b.get_value()
+        raise NotImplementedError()
 
     def get_weights_format(self):
         return ('v', 'h')
@@ -1544,6 +1551,8 @@ class CICDSoftmax(Layer):
         assert self.W.ndim == 2
         assert self.M.ndim == 2
         assert self.C.ndim == 2
+        assert hasattr(self, 'ci_to_cd_nonlinearity')
+        assert hasattr(self, 'prediction_mode')
 
         b = self.b
         m = self.m
@@ -1556,6 +1565,8 @@ class CICDSoftmax(Layer):
             MO = T.nnet.sigmoid(M)
         elif self.ci_to_cd_nonlinearity == 'relu':
             MO = T.maximum(0, M)
+        elif self.ci_to_cd_nonlinearity == 'tanh':
+            MO = T.tanh(M)
         else:
             MO = M
 
@@ -1579,12 +1590,10 @@ class CICDSoftmax(Layer):
         """
 
         if self.prediction_mode:
-
             #this is for testing purposes, training
             #in pred mode simplifies this to single task
             #mutli-class prediction
             rval = self._cost_partial(Y, Y_hat)
-            return -rval
         else:
 
             Y_cd, Y_ci = Y
@@ -1594,12 +1603,12 @@ class CICDSoftmax(Layer):
             rval_ci = self._cost_partial(Y_ci, Y_hat_ci)
 
             if self.costs_as_tuple:
-                rval = (-rval_cd, -rval_ci)
-                return rval
+                rval = (rval_cd, rval_ci)
             else:
                 rval = (1-self.ci_cost_scaler)*rval_cd \
                        + self.ci_cost_scaler*rval_ci
-                return -rval
+
+        return rval
 
     def _cost_partial(self, Y, Y_hat):
 
@@ -1626,7 +1635,7 @@ class CICDSoftmax(Layer):
 
         rval = log_prob_of.mean()
 
-        return rval
+        return -rval
 
     #def cost_from_X(self, data):
     #    """
@@ -1669,6 +1678,29 @@ class CICDSoftmax(Layer):
                 col_norms = T.sqrt(T.sum(T.sqr(updated_W), axis=0))
                 desired_norms = T.clip(col_norms, 0, self.max_col_norm)
                 updates[W] = updated_W * (desired_norms / (1e-7 + col_norms))
+
+        if self.M_max_row_norm is not None:
+            raise NotImplementedError('Row max norm not implemented for M')
+        if self.M_max_col_norm is not None:
+            assert self.M_max_row_norm is None
+            M = self.M
+            if M in updates:
+                updated_M = updates[M]
+                col_norms = T.sqrt(T.sum(T.sqr(updated_M), axis=0))
+                desired_norms = T.clip(col_norms, 0, self.M_max_col_norm)
+                updates[M] = updated_M * (desired_norms / (1e-7 + col_norms))
+
+        if self.C_max_row_norm is not None:
+            raise NotImplementedError('Row max norm not implemented for C')
+        if self.C_max_col_norm is not None:
+            assert self.C_max_row_norm is None
+            C = self.C
+            if C in updates:
+                updated_C = updates[C]
+                col_norms = T.sqrt(T.sum(T.sqr(updated_C), axis=0))
+                desired_norms = T.clip(col_norms, 0, self.C_max_col_norm)
+                updates[C] = updated_C * (desired_norms / (1e-7 + col_norms))
+
 
 class Linear(Layer):
     """
