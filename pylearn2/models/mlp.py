@@ -21,6 +21,7 @@ from theano.compat.python2x import OrderedDict
 from theano.gof.op import get_debug_values
 from theano.printing import Print
 from theano.sandbox.rng_mrg import MRG_RandomStreams
+from theano.gradient import consider_constant
 import theano.tensor as T
 
 from pylearn2.costs.mlp import Default
@@ -1275,10 +1276,13 @@ class CICDSoftmax(Layer):
                  ci_n_classes,
                  prediction_mode=False,
                  ci_to_cd_nonlinearity=None,
+                 zero_M_grad_for_cd=False,
+                 learn_C = True,
                  ci_cost_scaler=0.3,
                  costs_as_tuple=False,
                  low_rank=None,
                  irange=None,
+                 irange_C=None,
                  istdev=None,
                  sparse_init=None,
                  W_lr_scale=None,
@@ -1299,6 +1303,9 @@ class CICDSoftmax(Layer):
             W_lr_scale = float(W_lr_scale)
 
         if isinstance(C_lr_scale, str):
+            assert learn_C is True, (
+                "learn_C must be True to be able to use C_lr_scale parameter"
+            )
             C_lr_scale = float(C_lr_scale)
 
         if isinstance(M_lr_scale, str):
@@ -1310,10 +1317,10 @@ class CICDSoftmax(Layer):
         if isinstance(m_lr_scale, str):
             m_lr_scale = float(m_lr_scale)
 
-        assert ci_to_cd_nonlinearity in ['softmax', 'sigmoid', 'relu', 'tanh', 'None', None]
+        assert ci_to_cd_nonlinearity in ['softmax', 'sigmoid', 'relu', 'tanh', 'lin', 'None', None]
 
-        if ci_to_cd_nonlinearity == 'None':
-            ci_to_cd_nonlinearity = None
+        if ci_to_cd_nonlinearity == 'None' or ci_to_cd_nonlinearity is None:
+            ci_to_cd_nonlinearity = 'lin'
 
         self.__dict__.update(locals())
         del self.self
@@ -1492,7 +1499,10 @@ class CICDSoftmax(Layer):
             assert self.sparse_init is None
             W = rng.uniform(-self.irange,self.irange, (self.input_dim, self.cd_n_classes))
             M = rng.uniform(-self.irange,self.irange, (self.input_dim, self.ci_n_classes))
-            C = rng.uniform(-self.irange,self.irange, (self.ci_n_classes, self.cd_n_classes))
+            if self.irange_C is not None:
+                C = rng.uniform(-self.irange_C,self.irange_C, (self.ci_n_classes, self.cd_n_classes))
+            else:
+                C = np.zeros((self.ci_n_classes, self.cd_n_classes))
         elif self.istdev is not None:
             assert self.sparse_init is None
             W = rng.randn(self.input_dim, self.n_classes) * self.istdev
@@ -1513,7 +1523,9 @@ class CICDSoftmax(Layer):
         self.b = sharedX(np.zeros((self.cd_n_classes,)), "softmax_b")
         self.m = sharedX(np.zeros((self.ci_n_classes,)), "softmax_m")
 
-        self._params = [ self.b, self.m, self.W, self.M, self.C]
+        self._params = [ self.b, self.m, self.W, self.M]
+        if self.learn_C:
+            self._params.append(self.C)
 
     def get_weights_topo(self):
         if not isinstance(self.input_space, Conv2DSpace):
@@ -1552,12 +1564,16 @@ class CICDSoftmax(Layer):
         assert self.M.ndim == 2
         assert self.C.ndim == 2
         assert hasattr(self, 'ci_to_cd_nonlinearity')
+        assert hasattr(self, 'zero_M_grad_for_cd')
         assert hasattr(self, 'prediction_mode')
 
         b = self.b
         m = self.m
 
-        M = T.dot(state_below, self.M) + m
+        if self.zero_M_grad_for_cd:
+            M = T.dot(state_below, consider_constant(self.M)) + consider_constant(m)
+        else:
+            M = T.dot(state_below, self.M) + m
 
         if self.ci_to_cd_nonlinearity == 'softmax':
             MO = T.nnet.softmax(M)
@@ -1570,9 +1586,12 @@ class CICDSoftmax(Layer):
         else:
             MO = M
 
-        Z = T.dot(state_below, self.W) + T.dot(MO, self.C) + b
-        rval_cd = T.nnet.softmax(Z)
+        if self.learn_C:
+            Z = T.dot(state_below, self.W) + T.dot(MO, self.C) + b
+        else:
+            Z = T.dot(state_below, self.W) + b
 
+        rval_cd = T.nnet.softmax(Z)
         if self.prediction_mode is True:
             return rval_cd
         else:
