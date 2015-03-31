@@ -569,7 +569,7 @@ class QueuedDatasetIterator(object):
                 if patience > 0:
                     continue
                 else:
-                    warning.warn("QueueCacheLastElem was artificially put in the queue since the producer"
+                    warnings.warn("QueueCacheLastElem was artificially put in the queue since the producer"
                                  "did not put anything in the queue for a longer time that was predefined. "
                                  "If this is not the last epoch you should check if expected number of examples were presented ")
                     return QueueCacheLastElem()

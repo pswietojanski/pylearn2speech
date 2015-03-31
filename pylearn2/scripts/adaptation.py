@@ -22,6 +22,8 @@ def main(args=None):
     parser = OptionParser()
     parser.add_option("--adapt-yaml", dest="adapt_yaml", default="",
                       help="Provide the adaptation yaml template to start with")
+    parser.add_option("--model-params-file", dest="model_params_file", default="cnn_best.h5",
+                      help="Pytables with speaker-independent parameters to use")
     parser.add_option("--freeze-regex", dest="freeze_regex", default="softmax_[Wb]|h[0-9]_[Wb]|nlrf_[Wb]",
                       help="Regex to use when matching parameters to freeze")
     parser.add_option("--job", dest="JOB", default=0,
@@ -50,7 +52,7 @@ def main(args=None):
 
     #print "si model dir is %s"%si_model_dir   
     model_yaml = "%s/adapt_final%s.yaml"%(sa_model_dir, options.JOB)
-    model_params = "%s/cnn_best.h5"%si_model_dir
+    model_params = "%s/%s"%(si_model_dir, options.model_params_file)
     
     #print 'Yaml path', model_yaml
     #print 'Params path', model_params

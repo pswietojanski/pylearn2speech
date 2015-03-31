@@ -21,6 +21,7 @@ from theano.compat.python2x import OrderedDict
 from theano.gof.op import get_debug_values
 from theano.printing import Print
 from theano.sandbox.rng_mrg import MRG_RandomStreams
+from theano.gradient import consider_constant
 import theano.tensor as T
 
 from pylearn2.costs.mlp import Default
@@ -238,6 +239,9 @@ class MLP(Layer):
     def get_output_space(self):
         return self.layers[-1].get_output_space()
 
+    def get_target_source(self):
+        return self.layers[-1].get_target_source()
+
     def _update_layer_input_spaces(self):
         """
             Tells each layer what its input space should be.
@@ -300,6 +304,10 @@ class MLP(Layer):
         space = CompositeSpace((self.get_input_space(),
                                 self.get_output_space()))
         source = (self.get_input_source(), self.get_target_source())
+
+        print space
+        print source
+
         return (space, source)
 
     def get_params(self):
@@ -1262,22 +1270,32 @@ class CICDSoftmax(Layer):
     """
     A context-dependent-independent softmax layer
     """
-    def __init__(self, cd_n_classes, m_n_classes, layer_name,
-                 irange = None,  istdev = None,
-                 sparse_init = None,
-                 W_lr_scale = None,
-                 C_lr_scale = None,
-                 M_lr_scale = None,
-                 b_lr_scale = None,
-                 m_lr_scale = None,
-                 max_row_norm = None,
-                 max_col_norm = None,
-                 M_max_row_norm = None,
-                 M_max_col_norm = None,
-                 C_max_row_norm = None,
-                 C_max_col_norm = None,
-                 m_cost_scaler = 0.5,
-                 prediction_mode = False):
+    def __init__(self,
+                 layer_name,
+                 cd_n_classes,
+                 ci_n_classes,
+                 prediction_mode=False,
+                 ci_to_cd_nonlinearity=None,
+                 zero_M_grad_for_cd=False,
+                 learn_C = True,
+                 ci_cost_scaler=0.3,
+                 costs_as_tuple=False,
+                 low_rank=None,
+                 irange=None,
+                 irange_C=None,
+                 istdev=None,
+                 sparse_init=None,
+                 W_lr_scale=None,
+                 C_lr_scale=None,
+                 M_lr_scale=None,
+                 b_lr_scale=None,
+                 m_lr_scale=None,
+                 max_row_norm=None,
+                 max_col_norm=None,
+                 M_max_row_norm=None,
+                 M_max_col_norm=None,
+                 C_max_row_norm=None,
+                 C_max_col_norm=None):
         """
         """
 
@@ -1285,18 +1303,45 @@ class CICDSoftmax(Layer):
             W_lr_scale = float(W_lr_scale)
 
         if isinstance(C_lr_scale, str):
+            assert learn_C is True, (
+                "learn_C must be True to be able to use C_lr_scale parameter"
+            )
             C_lr_scale = float(C_lr_scale)
 
         if isinstance(M_lr_scale, str):
             M_lr_scale = float(M_lr_scale)
 
+        if isinstance(b_lr_scale, str):
+            b_lr_scale = float(b_lr_scale)
+
+        if isinstance(m_lr_scale, str):
+            m_lr_scale = float(m_lr_scale)
+
+        assert ci_to_cd_nonlinearity in ['softmax', 'sigmoid', 'relu', 'tanh', 'lin', 'None', None]
+
+        if ci_to_cd_nonlinearity == 'None' or ci_to_cd_nonlinearity is None:
+            ci_to_cd_nonlinearity = 'lin'
+
         self.__dict__.update(locals())
         del self.self
 
         assert isinstance(cd_n_classes, py_integer_types)
-        assert isinstance(m_n_classes, py_integer_types)
+        assert isinstance(ci_n_classes, py_integer_types)
 
-        self.output_space = VectorSpace(cd_n_classes)
+        if self.prediction_mode:
+            self.output_space = VectorSpace(cd_n_classes)
+        else:
+            self.output_space = CompositeSpace((VectorSpace(cd_n_classes),
+                                                VectorSpace(ci_n_classes)))
+
+    def get_target_source(self):
+        if self.prediction_mode:
+            return 'targets'
+        else:
+            return 'targets_cd', 'targets_ci'
+
+    def get_output_space(self):
+        return self.output_space
 
     def get_lr_scalers(self):
 
@@ -1324,7 +1369,7 @@ class CICDSoftmax(Layer):
         if not hasattr(self, 'm_lr_scale'):
             self.m_lr_scale = None
 
-        if self.b_lr_scale is not None:
+        if self.m_lr_scale is not None:
             assert isinstance(self.m_lr_scale, float)
             rval[self.m] = self.m_lr_scale
 
@@ -1345,7 +1390,7 @@ class CICDSoftmax(Layer):
         M_col_norms = T.sqrt(sq_M.sum(axis=0))
 
         C = self.C
-        assert W.ndim == 2
+        assert C.ndim == 2
         sq_C = T.sqr(C)
         C_row_norms = T.sqrt(sq_C.sum(axis=1))
         C_col_norms = T.sqrt(sq_C.sum(axis=0))
@@ -1373,21 +1418,62 @@ class CICDSoftmax(Layer):
 
     def get_monitoring_channels_from_state(self, state, target=None):
 
-        mx = state.max(axis=1)
+        rval = OrderedDict()
 
-        rval =  OrderedDict([
-                ('mean_max_class' , mx.mean()),
-                ('max_max_class' , mx.max()),
-                ('min_max_class' , mx.min())
-        ])
+        if isinstance(state, (list, tuple)):
 
-        if target is not None:
-            y_hat = T.argmax(state, axis=1)
-            y = T.argmax(target, axis=1)
-            misclass = T.neq(y, y_hat).mean()
-            misclass = T.cast(misclass, config.floatX)
-            rval['misclass'] = misclass
-            rval['nll'] = self.cost(Y_hat=state, Y=target)
+            assert len(state) == 2
+
+            state_cd = state[0]
+            state_ci = state[1]
+
+            mx_cd = state_cd.max(axis=1)
+            mx_ci = state_ci.max(axis=1)
+
+            rval =  OrderedDict([
+                ('cd_mean_max_class' , mx_cd.mean()),
+                ('cd_max_max_class' , mx_cd.max()),
+                ('cd_min_max_class' , mx_cd.min()),
+                ('ci_mean_max_class' , mx_ci.mean()),
+                ('ci_max_max_class' , mx_ci.max()),
+                ('ci_min_max_class' , mx_ci.min())
+            ])
+
+            if target is not None:
+
+                target_cd, target_ci = target
+
+                y_hat_cd = T.argmax(state_cd, axis=1)
+                y_cd = T.argmax(target_cd, axis=1)
+                misclass = T.neq(y_cd, y_hat_cd).mean()
+                misclass = T.cast(misclass, config.floatX)
+                rval['misclass'] = misclass
+                rval['nll'] = self._cost_partial(Y_hat=state_cd, Y=target_cd)
+
+                y_hat_ci = T.argmax(state_ci, axis=1)
+                y_ci = T.argmax(target_ci, axis=1)
+                misclass = T.neq(y_ci, y_hat_ci).mean()
+                misclass = T.cast(misclass, config.floatX)
+                rval['misclass_ci'] = misclass
+                rval['nll_ci'] = self._cost_partial(Y_hat=state_ci, Y=target_ci)
+        else:
+
+            mx_cd = state.max(axis=1)
+
+            rval =  OrderedDict([
+                ('cd_mean_max_class' , mx_cd.mean()),
+                ('cd_max_max_class' , mx_cd.max()),
+                ('cd_min_max_class' , mx_cd.min()),
+            ])
+
+            if target is not None:
+
+                y_hat_cd = T.argmax(state, axis=1)
+                y_cd = T.argmax(target, axis=1)
+                misclass = T.neq(y_cd, y_hat_cd).mean()
+                misclass = T.cast(misclass, config.floatX)
+                rval['misclass'] = misclass
+                rval['nll'] = self._cost_partial(Y_hat=state, Y=target)
 
         return rval
 
@@ -1412,8 +1498,11 @@ class CICDSoftmax(Layer):
             assert self.istdev is None
             assert self.sparse_init is None
             W = rng.uniform(-self.irange,self.irange, (self.input_dim, self.cd_n_classes))
-            M = rng.uniform(-self.irange,self.irange, (self.input_dim, self.m_n_classes))
-            C = rng.uniform(-self.irange,self.irange, (self.m_n_classes, self.cd_n_classes))
+            M = rng.uniform(-self.irange,self.irange, (self.input_dim, self.ci_n_classes))
+            if self.irange_C is not None:
+                C = rng.uniform(-self.irange_C,self.irange_C, (self.ci_n_classes, self.cd_n_classes))
+            else:
+                C = np.zeros((self.ci_n_classes, self.cd_n_classes))
         elif self.istdev is not None:
             assert self.sparse_init is None
             W = rng.randn(self.input_dim, self.n_classes) * self.istdev
@@ -1431,10 +1520,12 @@ class CICDSoftmax(Layer):
         self.C = sharedX(C,  'softmax_C' )
         self.M = sharedX(M,  'softmax_M' )
 
-        self.b = sharedX(np.zeros((self.cd_n_classes,), "softmax_b"))
-        self.m = sharedX(np.zeros((self.m_n_classes,), "softmax_m"))
+        self.b = sharedX(np.zeros((self.cd_n_classes,)), "softmax_b")
+        self.m = sharedX(np.zeros((self.ci_n_classes,)), "softmax_m")
 
-        self._params = [ self.b, self.W, self.M, self.C ]
+        self._params = [ self.b, self.m, self.W, self.M]
+        if self.learn_C:
+            self._params.append(self.C)
 
     def get_weights_topo(self):
         if not isinstance(self.input_space, Conv2DSpace):
@@ -1445,19 +1536,16 @@ class CICDSoftmax(Layer):
         return rval
 
     def get_weights(self):
-        if not isinstance(self.input_space, VectorSpace):
-            raise NotImplementedError()
-
-        return self.W.get_value()
+        raise NotImplementedError()
 
     def set_weights(self, weights):
-        self.W.set_value(weights)
+        raise NotImplementedError()
 
     def set_biases(self, biases):
-        self.b.set_value(biases)
+        raise NotImplementedError()
 
     def get_biases(self):
-        return self.b.get_value()
+        raise NotImplementedError()
 
     def get_weights_format(self):
         return ('v', 'h')
@@ -1469,30 +1557,49 @@ class CICDSoftmax(Layer):
         if self.needs_reformat:
             state_below = self.input_space.format_as(state_below, self.desired_space)
 
-        for value in get_debug_values(state_below):
-            if self.mlp.batch_size is not None and value.shape[0] != self.mlp.batch_size:
-                raise ValueError("state_below should have batch size "+str(self.dbm.batch_size)+" but has "+str(value.shape[0]))
-
         self.desired_space.validate(state_below)
         assert state_below.ndim == 2
 
         assert self.W.ndim == 2
         assert self.M.ndim == 2
         assert self.C.ndim == 2
+        assert hasattr(self, 'ci_to_cd_nonlinearity')
+        assert hasattr(self, 'zero_M_grad_for_cd')
+        assert hasattr(self, 'prediction_mode')
 
         b = self.b
         m = self.m
 
-        M = T.dot(state_below, self.M) + m
-        Z = T.dot(state_below, self.W) + T.dot(M, self.C) + b
+        if self.zero_M_grad_for_cd:
+            M = T.dot(state_below, consider_constant(self.M)) + consider_constant(m)
+        else:
+            M = T.dot(state_below, self.M) + m
 
-        rval_m = T.nnet.softmax(M)
+        if self.ci_to_cd_nonlinearity == 'softmax':
+            MO = T.nnet.softmax(M)
+        elif self.ci_to_cd_nonlinearity == 'sigmoid':
+            MO = T.nnet.sigmoid(M)
+        elif self.ci_to_cd_nonlinearity == 'relu':
+            MO = T.maximum(0, M)
+        elif self.ci_to_cd_nonlinearity == 'tanh':
+            MO = T.tanh(M)
+        else:
+            MO = M
+
+        if self.learn_C:
+            Z = T.dot(state_below, self.W) + T.dot(MO, self.C) + b
+        else:
+            Z = T.dot(state_below, self.W) + b
+
         rval_cd = T.nnet.softmax(Z)
-
-        if self.prediction_mode:
+        if self.prediction_mode is True:
             return rval_cd
         else:
-            return (rval_cd, rval_m)
+            if self.ci_to_cd_nonlinearity == 'softmax':
+                rval_m = MO
+            else:
+                rval_m = T.nnet.softmax(M)
+            return rval_cd, rval_m
 
     def cost(self, Y, Y_hat):
         """
@@ -1501,60 +1608,65 @@ class CICDSoftmax(Layer):
         distribution.
         """
 
-        assert self.prediction_mode is False, (
-            "You need to set prediction_mode to false for training"
-        )
+        if self.prediction_mode:
+            #this is for testing purposes, training
+            #in pred mode simplifies this to single task
+            #mutli-class prediction
+            rval = self._cost_partial(Y, Y_hat)
+        else:
 
-        Y_cd, Y_m = Y
-        Y_hat_cd, Y_hat_m = Y_hat
+            Y_cd, Y_ci = Y
+            Y_hat_cd, Y_hat_ci = Y_hat
 
-        assert hasattr(Y_hat_cd, 'owner')
-        assert hasattr(Y_hat_m, 'owner')
+            rval_cd = self._cost_partial(Y_cd, Y_hat_cd)
+            rval_ci = self._cost_partial(Y_ci, Y_hat_ci)
+
+            if self.costs_as_tuple:
+                rval = (rval_cd, rval_ci)
+            else:
+                rval = (1-self.ci_cost_scaler)*rval_cd \
+                       + self.ci_cost_scaler*rval_ci
+
+        return rval
+
+    def _cost_partial(self, Y, Y_hat):
+
+        assert hasattr(Y_hat, 'owner')
 
         #get inputs for cd task
-        cd_owner = Y_hat_cd.owner
-        assert cd_owner is not None
-        cd_op = cd_owner.op
-        if isinstance(cd_op, Print):
-            assert len(cd_owner.inputs) == 1
-            Y_hat_cd, = cd_owner.inputs
-            cd_owner = Y_hat_cd.owner
-            cd_op = cd_owner.op
-        assert isinstance(cd_op, T.nnet.Softmax)
-        cd_z ,= cd_owner.inputs
-        assert cd_z.ndim == 2
+        owner = Y_hat.owner
+        assert owner is not None
+        op = owner.op
+        if isinstance(op, Print):
+            assert len(owner.inputs) == 1
+            Y_hat, = owner.inputs
+            owner = Y_hat.owner
+            op = owner.op
+        assert isinstance(op, T.nnet.Softmax)
+        z ,= owner.inputs
+        assert z.ndim == 2
 
-        m_owner = Y_hat_m.owner
-        assert m_owner is not None
-        m_op = m_owner.op
-        if isinstance(m_op, Print):
-            assert len(m_owner.inputs) == 1
-            Y_hat_m, = m_owner.inputs
-            m_owner = Y_hat_m.owner
-            m_op = m_owner.op
-        assert isinstance(m_op, T.nnet.Softmax)
-        m_z ,= m_owner.inputs
-        assert m_z.ndim == 2
-
-        cd_z = cd_z - cd_z.max(axis=1).dimshuffle(0, 'x')
-        log_prob_cd = cd_z - T.log(T.exp(cd_z).sum(axis=1).dimshuffle(0, 'x'))
+        z = z - z.max(axis=1).dimshuffle(0, 'x')
+        log_prob = z - T.log(T.exp(z).sum(axis=1).dimshuffle(0, 'x'))
         # we use sum and not mean because this is really one variable per row
-        log_prob_of_cd = (Y_cd * log_prob_cd).sum(axis=1)
-        assert log_prob_of_cd.ndim == 1
+        log_prob_of = (Y * log_prob).sum(axis=1)
+        assert log_prob_of.ndim == 1
 
-        rval_cd = log_prob_of_cd.mean()
+        rval = log_prob_of.mean()
 
-        m_z = m_z - m_z.max(axis=1).dimshuffle(0, 'x')
-        log_prob_m = m_z - T.log(T.exp(m_z).sum(axis=1).dimshuffle(0, 'x'))
-        # we use sum and not mean because this is really one variable per row
-        log_prob_of_m = (Y_m * log_prob_m).sum(axis=1)
-        assert log_prob_of_m.ndim == 1
+        return -rval
 
-        rval_m = log_prob_of_m.mean()
+    #def cost_from_X(self, data):
+    #    """
+    #    Computes self.cost, but takes data=(X, Y) rather than Y_hat as an argument.
+    #    This is just a wrapper around self.cost that computes Y_hat by
+    #    calling Y_hat = self.fprop(X)
+    #    """
+    #    self.cost_from_X_data_specs()[0].validate(data)
+    #    X, Y = data
+    #    Y_hat = self.fprop(X)
+    #    return self.cost(Y, Y_hat)
 
-        rval = (1-self.m_cost_scaler)*rval_cd + self.m_cost_scaler*rval_m
-
-        return - rval
 
     def get_weight_decay(self, coeff):
         if isinstance(coeff, str):
@@ -1585,6 +1697,29 @@ class CICDSoftmax(Layer):
                 col_norms = T.sqrt(T.sum(T.sqr(updated_W), axis=0))
                 desired_norms = T.clip(col_norms, 0, self.max_col_norm)
                 updates[W] = updated_W * (desired_norms / (1e-7 + col_norms))
+
+        if self.M_max_row_norm is not None:
+            raise NotImplementedError('Row max norm not implemented for M')
+        if self.M_max_col_norm is not None:
+            assert self.M_max_row_norm is None
+            M = self.M
+            if M in updates:
+                updated_M = updates[M]
+                col_norms = T.sqrt(T.sum(T.sqr(updated_M), axis=0))
+                desired_norms = T.clip(col_norms, 0, self.M_max_col_norm)
+                updates[M] = updated_M * (desired_norms / (1e-7 + col_norms))
+
+        if self.C_max_row_norm is not None:
+            raise NotImplementedError('Row max norm not implemented for C')
+        if self.C_max_col_norm is not None:
+            assert self.C_max_row_norm is None
+            C = self.C
+            if C in updates:
+                updated_C = updates[C]
+                col_norms = T.sqrt(T.sum(T.sqr(updated_C), axis=0))
+                desired_norms = T.clip(col_norms, 0, self.C_max_col_norm)
+                updates[C] = updated_C * (desired_norms / (1e-7 + col_norms))
+
 
 class Linear(Layer):
     """

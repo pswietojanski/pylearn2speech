@@ -140,7 +140,7 @@ class TransformerIterator(object):
         return self
 
     def next(self):
-        raw_batch = self.raw_iterator.next()
+        raw_batch = self.raw_iterator.next
 
         # Apply transformation on raw_batch, and format it
         # in the requested Space

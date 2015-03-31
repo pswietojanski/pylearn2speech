@@ -19,6 +19,7 @@ from pylearn2.utils import serial, sharedX
 
 log = logging.getLogger(__name__)
 
+
 class Pylearn2KaldiDecoderProvider(object):
     def __init__(self, model, preprocessor=None):
         self.model = model
@@ -171,7 +172,7 @@ def decoder_loop(buffer, decoder, debug=False):
             tmp[0:lb.shape[0]] = lb
             flist[-1] = tmp
         return flist
-    
+    #ts = numpy.zeros((11999,))
     while True:
         
         rval  = read_ark_entry_from_buffer(buffer)
@@ -194,10 +195,12 @@ def decoder_loop(buffer, decoder, debug=False):
         
         if debug:
             print "UTTID: %s\n"%uttid
-            print "Original (piped) features are of shape: ", feats.shape
-            print "Pre-processed features are of shape: ", pfeats.shape
-            print "Predictions are of shape: ", activations.shape
-            print activations
+            #print "Original (piped) features are of shape: ", feats.shape
+            #print "Pre-processed features are of shape: ", pfeats.shape
+            #print "Predictions are of shape: ", activations.shape
+            #tses = numpy.argmax(activations, axis=1).tolist()
+            #for t in tses:
+            #    ts[t] += 1
         else:
             f=tempfile.SpooledTemporaryFile(max_size=209715200) #keep up to 200MB in memory
             write_ark_entry_to_buffer(f, uttid, activations)
@@ -205,6 +208,7 @@ def decoder_loop(buffer, decoder, debug=False):
             f.seek(0)
             print f.read()
             f.close()
+    #numpy.save('ts_30h.dnn.1k', ts)
 
 def main(args=None):
 

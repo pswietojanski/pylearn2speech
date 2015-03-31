@@ -61,4 +61,4 @@ def test_pytables():
     ds = DenseDesignMatrixPyTables(X = x, y = y)
 
     it = ds.iterator(mode = 'sequential', batch_size = 1)
-    it.next()
+    it.next

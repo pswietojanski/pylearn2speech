@@ -112,7 +112,7 @@ class EmotionsDataset(DenseDesignMatrix):
         reader = csv.reader(csv_file)
 
         # Discard header
-        row = reader.next()
+        row = reader.next
 
         y_list = []
         X_list = []
