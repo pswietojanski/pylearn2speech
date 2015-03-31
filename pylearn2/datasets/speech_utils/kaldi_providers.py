@@ -630,9 +630,25 @@ class CICDKaldiAlignFeatsProviderUtt(KaldiFeatsProviderUtt):
 
 
 class SequenceKaldiAlignFeatsProviderUtt(KaldiFeatsProviderUtt):
-    def __init__(self):
-        pass
+    """A provider providing a featrues, alignments and lattice
+     posteriors.
+    """
+    def __init__(self, feats_provider, lattice_provider):
+        self.feats_provider = feats_provider
+        self.lattice_provider = lattice_provider
 
+    def __iter__(self):
+        return self
+
+    def next(self):
+
+        try:
+
+            acoustics = self.feats_provider.next()
+            #posteriors
+
+        except StopIteration:
+            raise StopIteration
 
 class MultiStreamCall(Process):
     def __init__(self, thread_id, in_queue, out_queue):

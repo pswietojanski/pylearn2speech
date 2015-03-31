@@ -22,7 +22,7 @@ def main(args=None):
     parser = OptionParser()
     parser.add_option("--adapt-yaml", dest="adapt_yaml", default="",
                       help="Provide the adaptation yaml template to start with")
-    parser.add_option("--model-params-file", dest="model_params_file", default="best.h5",
+    parser.add_option("--model-params-file", dest="model_params_file", default="cnn_best.h5",
                       help="Pytables with speaker-independent parameters to use")
     parser.add_option("--freeze-regex", dest="freeze_regex", default="softmax_[Wb]|h[0-9]_[Wb]|nlrf_[Wb]",
                       help="Regex to use when matching parameters to freeze")

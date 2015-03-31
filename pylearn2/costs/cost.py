@@ -212,6 +212,7 @@ class CostCDCI(Cost):
         zero_grads = []
         if self.zero_ci_grad_for_cd:
             #how to get this in less explicit way, i.e. using only dict?
+            print 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'
             assert model.layers[-1].M in params_dict
             assert model.layers[-1].m in params_dict
             zero_grads = [model.layers[-1].M, model.layers[-1].m]
