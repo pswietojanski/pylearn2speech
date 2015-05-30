@@ -3565,3 +3565,4 @@ def Lp_pool_channels_1D(bc01, num_inp_channels, num_out_channels, lp_order):
         else:
             pp = pp + t
     return pp**(1.0/lp_order)
+

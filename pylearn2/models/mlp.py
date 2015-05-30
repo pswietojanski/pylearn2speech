@@ -2235,7 +2235,7 @@ class RectifiedLinear(Linear):
     
     def fprop(self, state_below):
         p = self._linear_part(state_below)
-        p = p * (p > 0.) + self.left_slope * p * (p < 0.)
+        p = T.switch(p > 0., p, self.left_slope * p)
         return p
 
     def cost(self, *args, **kwargs):
@@ -2506,7 +2506,7 @@ class ConvRectifiedLinear(Layer):
         if self.layer_name is not None:
             z.name = self.layer_name + '_z'
 
-        d = z * (z > 0.) + self.left_slope * z * (z < 0.)
+        p = T.switch(z > 0., z, self.left_slope * z)
 
         self.detector_space.validate(d)
 

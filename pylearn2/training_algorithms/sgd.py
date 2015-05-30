@@ -478,7 +478,7 @@ class MonitorBasedLRNewBob(TrainExtension):
     """
     
     def __init__(self, scale_by=.5, ramping_threshold=.005, ramping=False, do_ramping=True,
-                 dataset_name=None, channel_name=None):
+                 dataset_name=None, channel_name=None, boost_momentum_to=None):
         """
         :type start_rate: float
         :param start_rate: 
@@ -504,7 +504,9 @@ class MonitorBasedLRNewBob(TrainExtension):
         self.ramping_threshold = ramping_threshold
         self.ramping = ramping
         self.do_ramping = do_ramping
-        
+        self.was_ramping = False
+        self.boost_momentum_to = boost_momentum_to
+
         if channel_name is not None:
             self.channel_name = channel_name
         else:
@@ -558,7 +560,20 @@ class MonitorBasedLRNewBob(TrainExtension):
             rval *= self.scale_by
             log.info('shrinking started, new learning rate is %.6f'%rval)
         else: pass
-            
+
+        #if self.ramping and (not self.was_ramping) and (self.boost_momentum_to is not None):
+        if self.ramping and (self.boost_momentum_to is not None):
+            assert hasattr(algorithm, 'momentum'), (
+                "Asked to boost momentum after halving was started, "
+                "but the algorithm is not using it"
+            )
+            current_momentum = algorithm.momentum.get_value()
+            algorithm.momentum.set_value(np.cast[config.floatX](self.boost_momentum_to))
+            log.info('Momentum boosted from %.2f to %.2f by learning rate scheduler.'\
+                     %(current_momentum, self.boost_momentum_to))
+            self.was_ramping = True
+            self.ramping = False #giva a model a chance to adapt to new momentum and lower lr
+
         lr.set_value(np.cast[lr.dtype](rval))
 
 

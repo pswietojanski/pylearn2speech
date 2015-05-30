@@ -64,7 +64,7 @@ class Pylearn2KaldiDecoderProvider(object):
 
 
 def load_kaldi_priors(path):
-    numbers=numpy.fromregex(path, r"(\d+)", dtype=[('num', numpy.int32)])
+    numbers=numpy.fromregex(path, r"([\d\.e+]+)", dtype=[('num', numpy.float32)])
     class_counts=numpy.asarray(numbers['num'], dtype=theano.config.floatX)
     priors = class_counts/class_counts.sum()
     #floor zeroes to something small so log() on that will be different from -inf or better skip these in contribution at all i.e. set to -log(0)?
@@ -195,9 +195,9 @@ def decoder_loop(buffer, decoder, debug=False):
         
         if debug:
             print "UTTID: %s\n"%uttid
-            #print "Original (piped) features are of shape: ", feats.shape
-            #print "Pre-processed features are of shape: ", pfeats.shape
-            #print "Predictions are of shape: ", activations.shape
+            print "Original (piped) features are of shape: ", feats.shape
+            print "Pre-processed features are of shape: ", pfeats.shape
+            print "Predictions are of shape: ", activations.shape
             #tses = numpy.argmax(activations, axis=1).tolist()
             #for t in tses:
             #    ts[t] += 1

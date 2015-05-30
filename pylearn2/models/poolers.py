@@ -40,6 +40,7 @@ class LpFixedPooler(Layer):
                  c_lr_scale = None,
                  b_lr_scale = None,
                  pool_normalisation = False,
+                 mv_normalisation = False,
                  min_zero = False,
         ):
         """
@@ -247,6 +248,10 @@ class LpFixedPooler(Layer):
 
         if self.post_bias:
             p = p + self.b
+
+        if self.mv_normalisation:
+            stddev = T.sqrt(T.mean(T.sqr(p), axis=1)).dimshuffle(0,'x')
+            p = p*(1.0/stddev)*(stddev>1) + p*(stddev<=1)
 
         p.name = self.layer_name + '_p_'
 
@@ -513,7 +518,7 @@ class LpPooler(Layer):
                 p = p + cur
         
         if self.pool_normalisation:   
-            p = p/self.pool_size
+            p = p*(1.0/self.pool_size)
         
         p = T.maximum(p, epsilon) # fix to gradients w.r.t x in case sum_i x_i**p is close to or 0         
         p = p**(1.0/pr)
@@ -527,10 +532,7 @@ class LpPooler(Layer):
         
         if self.mv_normalisation:
             stddev = T.sqrt(T.mean(T.sqr(p), axis=1)).dimshuffle(0,'x')
-            p = p/stddev*(stddev>1) + p*(stddev<=1)
-            #mean = T.mean(p, axis=0).dimshuffle('x',0)
-            #stddev = T.sqrt(T.mean(T.sqr(p), axis=0)).dimshuffle('x',0)
-            #p = (p-mean)/(stddev+0.001)
+            p = p*(1.0/stddev)*(stddev>1) + p*(stddev<=1)
         
         p.name = self.layer_name + '_p_'
 
@@ -1931,7 +1933,7 @@ class MultiplicativeAdapter(Layer):
         return rval
 
     def get_monitoring_channels(self):
-    
+
         return OrderedDict([
                             ('u_min'  , self.u.min()),
                             ('u_mean' , self.u.mean()),
@@ -1939,7 +1941,7 @@ class MultiplicativeAdapter(Layer):
                             ])
 
     def set_input_space(self, space):
-        
+
         self.input_space = space
 
         if isinstance(space, VectorSpace):
@@ -1951,7 +1953,7 @@ class MultiplicativeAdapter(Layer):
             self.desired_space = VectorSpace(self.input_dim)
 
         self.output_space = VectorSpace(self.input_dim)
-       
+
         if self.irange is not None:
             u = np.random.uniform(-self.irange, +self.iragne,
                                     (self.input_dim,), dtype=config.floatX)
@@ -1961,24 +1963,24 @@ class MultiplicativeAdapter(Layer):
             else:
                 offset = 1.0
             u = np.zeros((self.input_dim,), dtype=config.floatX) + offset
-            
+
         self.u = sharedX(u, name=self.layer_name+'_u')
 
     def get_weights_topo(self):
         raise NotImplementedError()
-        
+
     def get_weights(self):
         raise NotImplementedError()
 
     def censor_updates(self, updates):
         return OrderedDict()
-    
+
     def get_params(self):
         assert self.u.name is not None
- 
+
         rval = []
         rval.append(self.u)
-       
+
         return rval
 
     def fprop(self, state_below):
@@ -1989,7 +1991,7 @@ class MultiplicativeAdapter(Layer):
             state_below = self.input_space.format_as(state_below, self.desired_space)
 
         self.output_space.validate(state_below)
-        
+
         z = state_below
         if self.constraint == "sigmoid":
             amp = 2*T.nnet.sigmoid(self.u)
@@ -2003,7 +2005,128 @@ class MultiplicativeAdapter(Layer):
         a = z*amp
 
         a.name = "_a_"
-        
+
+        return a
+
+
+class RecurrentMultiplicativeAdapter(Layer):
+    """
+    This code was used for speaker adaptation experiments
+    for large vocabulary speech recognition in the following paper:
+
+    Learning Hidden Unit Contributions for Unsupervised
+    Adaptation of Neural Network Acoustic Models,
+    Swietojanski and Renals, IEEE SLT, 2014
+
+    This isn't really a pooling operator, but was used in a similar
+    context (for adaptation) hence the code it's here.
+    """
+    def __init__(self, layer_name,
+                       irange = None,
+                       u_lr_scale = None,
+                       constraint = 'sigmoid',
+                       decoding = False):
+        """
+            layer_name: a layer name that will be
+            irange: if specified, the initial multipliers will be randomly
+                    selected from U(-irange, irange)
+            u_lr_scale: learning rate scaling for u w.r.t the main learning
+                    rate
+            decoding: once the model is trained, u is fixed as such there is
+                    no need to evaluate simgoid(u) for each example
+        """
+
+        assert constraint in ['sigmoid', 'exp', 'relu', 'none']
+
+        self.__dict__.update(locals())
+        del self.self
+
+    def get_lr_scalers(self):
+
+        rval = OrderedDict()
+
+        if not hasattr(self, 'u_lr_scale'):
+            self.u_lr_scale = None
+
+        if self.u_lr_scale is not None:
+            rval[self.u] = self.u_lr_scale
+
+        return rval
+
+    def get_monitoring_channels(self):
+
+        return OrderedDict([
+                            ('u_min'  , self.u.min()),
+                            ('u_mean' , self.u.mean()),
+                            ('u_max'  , self.u.max()),
+                            ])
+
+    def set_input_space(self, space):
+
+        self.input_space = space
+
+        if isinstance(space, VectorSpace):
+            self.requires_reformat = False
+            self.input_dim = space.dim
+        else:
+            self.requires_reformat = True
+            self.input_dim = space.get_total_dimension()
+            self.desired_space = VectorSpace(self.input_dim)
+
+        self.output_space = VectorSpace(self.input_dim)
+
+        if self.irange is not None:
+            u = np.random.uniform(-self.irange, +self.iragne,
+                                    (self.input_dim,), dtype=config.floatX)
+        else:
+            if self.constraint in ['sigmoid', 'exp']:
+                offset = 0.0
+            else:
+                offset = 1.0
+            u = np.zeros((self.input_dim,), dtype=config.floatX) + offset
+
+        self.u = sharedX(u, name=self.layer_name+'_u')
+
+    def get_weights_topo(self):
+        raise NotImplementedError()
+
+    def get_weights(self):
+        raise NotImplementedError()
+
+    def censor_updates(self, updates):
+        return OrderedDict()
+
+    def get_params(self):
+        assert self.u.name is not None
+
+        rval = []
+        rval.append(self.u)
+
+        return rval
+
+    def fprop(self, state_below):
+
+        self.input_space.validate(state_below)
+
+        if self.requires_reformat:
+            state_below = self.input_space.format_as(state_below, self.desired_space)
+
+        self.output_space.validate(state_below)
+
+        z = state_below
+        if self.constraint == "sigmoid":
+            amp = 2*T.nnet.sigmoid(self.u)
+        elif self.constraint == "exp":
+            amp = T.exp(self.u)
+        elif self.constraint == "relu":
+            amp = T.maximum(0.0, self.relu)
+        else:
+            amp = self.u
+
+        a = z*amp
+
+        a.name = "_a_"
+
         return a
 
 
