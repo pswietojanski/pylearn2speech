@@ -179,8 +179,11 @@ def decoder_loop(buffer, decoder, debug=False):
         if rval=='':
            break
         uttid, feats = rval
-        
-        pfeats = decoder.apply_preprocessor(feats)  #preprocess if necessary
+
+        if not isinstance(feats, tuple):
+            feats = (feats,)
+
+        pfeats, = decoder.apply_preprocessor(feats)  #preprocess if necessary
         #decoder.model.set_batch_size(pfeats.shape[0])
         batches = make_batches(pfeats, decoder.model.batch_size)
         
@@ -195,7 +198,7 @@ def decoder_loop(buffer, decoder, debug=False):
         
         if debug:
             print "UTTID: %s\n"%uttid
-            print "Original (piped) features are of shape: ", feats.shape
+            print "Original (piped) features are of shape: ", feats[0].shape
             print "Pre-processed features are of shape: ", pfeats.shape
             print "Predictions are of shape: ", activations.shape
             #tses = numpy.argmax(activations, axis=1).tolist()

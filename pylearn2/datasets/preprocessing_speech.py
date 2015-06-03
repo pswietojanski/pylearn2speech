@@ -252,7 +252,8 @@ class ReorderByBands(OnlinePreprocessor):
         6) Look at tests to get more intuition
         """
 
-        x, y = xy
+        data = list(xy)
+        x = data[0]
 
         x_shape = x.shape
         xx = x
@@ -293,9 +294,10 @@ class ReorderByBands(OnlinePreprocessor):
             #instead of (mb, c, 1, feats) produces (mb, c, feats/stride, stride)
             assert isinstance(rval.shape[3]/self.reshape_stride_for_1D, (int, long))
             rval = rval.reshape(rval.shape[0]. rval.shape[1], rval.shape[3]/self.reshape_stride_for_1D, self.reshape_stride_for_1D)
-        
+
+        data[0] = rval
         #print 'ReorderByBands rval shape is ',rval.shape
-        return (rval, y)
+        return tuple(data)
 
     def get_pre_data_spec(self):
         return NotImplementedError('This is abstract class which did not implement data_specs')
