@@ -63,12 +63,18 @@ class Pylearn2KaldiDecoderProvider(object):
             self.fprop = function(inputs = [X], outputs = z)
 
 
-def load_kaldi_priors(path):
+def load_kaldi_priors(path, uniform_smoothing_scaler=0.05):
+    assert 0 <= uniform_smoothing_scaler <= 1.0, (
+        "Expected 0 <= uniform_smoothing_scaler <=1, got %f"%uniform_smoothing_scaler
+    )
     numbers=numpy.fromregex(path, r"([\d\.e+]+)", dtype=[('num', numpy.float32)])
     class_counts=numpy.asarray(numbers['num'], dtype=theano.config.floatX)
-    priors = class_counts/class_counts.sum()
+    #compute the uniform smoothing count
+    uniform_priors = numpy.ceil(class_counts.mean()*uniform_smoothing_scaler)
+    priors = (class_counts + uniform_priors)/class_counts.sum()
     #floor zeroes to something small so log() on that will be different from -inf or better skip these in contribution at all i.e. set to -log(0)?
-    priors[priors<1e-10] = 1e-10
+    flooring=1e-9
+    priors[priors<flooring] = flooring
     assert numpy.all(priors > 0) and numpy.all(priors <= 1.0), (
         "Prior probabilities outside [0,1] range."
     )
@@ -205,7 +211,7 @@ def decoder_loop(buffer, decoder, debug=False):
             #for t in tses:
             #    ts[t] += 1
         else:
-            f=tempfile.SpooledTemporaryFile(max_size=209715200) #keep up to 200MB in memory
+            f=tempfile.SpooledTemporaryFile(max_size=409715200) #keep up to 200MB in memory
             write_ark_entry_to_buffer(f, uttid, activations)
             f.flush()
             f.seek(0)
