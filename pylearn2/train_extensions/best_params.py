@@ -185,6 +185,7 @@ class MonitorBasedSaveBestPyTables(TrainExtension):
             self.__dump_params(model)
 
         if new_cost < self.best_cost:
+            self.best_cost = new_cost
             self.__dump_params(model)
 
     def __dump_params(self, model):
