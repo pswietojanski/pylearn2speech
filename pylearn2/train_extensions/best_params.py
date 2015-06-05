@@ -179,15 +179,21 @@ class MonitorBasedSaveBestPyTables(TrainExtension):
         val_record = channel.val_record
         new_cost = self.coeff * val_record[-1]
 
-        if new_cost < self.best_cost:
-            self.best_cost = new_cost
-            if self.save_freezed_params is True:
-                freeze_set = model.freeze_set
-                model.frezze(set([]))
-                params = model.get_params()
-                model.freeze(freeze_set)
-            else:
-                params = model.get_params()
-            #TODO: implement param_keys selection
-            serial.save_params_to_pytables(self.save_path, params, on_overwrite='ignore')
+        #dump speaker-dependent initial parameters, so in case objective does not
+        #improve, one can load meaningful speaker-independent transforms
+        if self.best_cost is np.inf:
+            self.__dump_params(model)
 
+        if new_cost < self.best_cost:
+            self.__dump_params(model)
+
+    def __dump_params(self, model):
+         if self.save_freezed_params is True:
+             freeze_set = model.freeze_set
+             model.frezze(set([]))
+             params = model.get_params()
+             model.freeze(freeze_set)
+         else:
+             params = model.get_params()
+
+         serial.save_params_to_pytables(self.save_path, params, on_overwrite='ignore')
