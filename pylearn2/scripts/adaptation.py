@@ -2,76 +2,87 @@
 
 __author__ = "Pawel Swietojanski"
 
-import os, sys, numpy, struct, tempfile, theano, time, re
+import os
+import sys
+import re
+import logging
 
-from optparse import OptionParser
-
-
-from pylearn2.datasets.speech_utils.kaldi_providers import read_ark_entry_from_buffer, write_ark_entry_to_buffer
-from pylearn2.scripts.pkl_to_pytables import ModelPyTables
+from argparse import ArgumentParser
 from pylearn2.utils import serial, sharedX
 
-def fill_adapt_template(yaml_tpl, dict):
-    yaml_template = open(yaml_tpl, 'r').read()
-    
+log = logging.getLogger()
+
+def load_params_from_list_of_hdfs(files_list, override=True):
+    assert files_list is not None and files_list != "", (
+        "Expected to at least one path hdf with parameters"
+    )
+
+    if isinstance(files_list, (list, tuple)):
+        files = files_list
+    else:
+        files = re.split('[\s,]', files_list)
+
+    params_list = []
+    for f in files:
+        if not os.path.isfile(f):
+            raise IOError('File %s not found'%f)
+        params_file = serial.load_params_from_pytables(f, container_name=None)
+        params_list.append(params_file)
+
+    rval = {}
+    for idx, params in enumerate(params_list):
+        for key in params.keys():
+            if key in rval:
+                if override:
+                    log.warning('Overriding param(%s) from (%s) by the one found in (%s)'\
+                                % (key, files[idx-1], files[idx]))
+                    print 'Overriding param(%s) from (%s) by the one found in (%s)'\
+                                % (key, files[idx-1], files[idx])
+                else:
+                    raise KeyError("Param %s found in both %s and %s and override is False"\
+                                     % (key, files[idx-1], files[idx]))
+            rval[key] = params[key]
+
+    return rval
 
 def main(args=None):
     
     usage = "adaptation.py [options] <si-model-dir> <sa-model-dir> <feats-scp> <targets-pdf> "
     
-    parser = OptionParser()
-    parser.add_option("--adapt-yaml", dest="adapt_yaml", default="",
+    parser = ArgumentParser(usage=usage)
+    parser.add_argument("--adapt-yaml", dest="adapt_yaml", default="",
                       help="Provide the adaptation yaml template to start with")
-    parser.add_option("--model-params-file", dest="model_params_file", default="cnn_best.h5",
-                      help="Pytables with speaker-independent parameters to use")
-    parser.add_option("--freeze-regex", dest="freeze_regex", default="softmax_[Wb]|h[0-9]_[Wb]|nlrf_[Wb]",
+    parser.add_argument("--model-pytables", dest="model_pytables", nargs='+', default=None,
+                      help="A list of hdf containers with parameters, will be set in order as they appear on the list.")
+    parser.add_argument("--freeze-regex", dest="freeze_regex", default="softmax_[Wb]|h[0-9]_[Wb]|nlrf_[Wb]",
                       help="Regex to use when matching parameters to freeze")
-    parser.add_option("--job", dest="JOB", default=0,
+    parser.add_argument("--job", dest="JOB", default=0,
                       help="JOB ID used to store model in")
-    parser.add_option("--debug", dest="debug", default=False,
+    parser.add_argument("--override", dest="override", default=True,
+                      help="When specified many files and some parameters have the same name, the ones appearing later in the list will override the former ones.")
+    parser.add_argument("--debug", dest="debug", default=False,
                       help="Prints activations and shapes in text format rather than binary Kaldi archives")
-    
-    (options,args) = parser.parse_args(args=args)
-    
-    print options.adapt_yaml
-    print options.freeze_regex
-    print options.JOB
-    print 'ARGS: ', args
-   
-    #if options.adapt_yaml!='':
-    #    NotImplementedError('Lodaing from pkl not yet supported due to GPU/CPU pickle issues.')
-         
-    if len(args) != 5:
-        print usage
-        exit(1)
-        
-    si_model_dir = args[1]
-    sa_model_dir = args[2]
-    feats_scp = args[3]
-    targets_pdf = args[4]
 
-    #print "si model dir is %s"%si_model_dir   
-    model_yaml = "%s/adapt_final%s.yaml"%(sa_model_dir, options.JOB)
-    model_params = "%s/%s"%(si_model_dir, options.model_params_file)
-    
-    #print 'Yaml path', model_yaml
-    #print 'Params path', model_params
-    
+    parser.add_argument("si_model_dir", help="Model directory")
+    parser.add_argument("sa_model_dir", help="Adaptation directory")
+    parser.add_argument("feats_scp", help="Scp Kaldi list of files used to adaptation")
+    parser.add_argument("targets_pdf", help="Kaldi 0-indexed list of pdfs")
+
+    options = parser.parse_args()
+
+    model_yaml = "%s/adapt_final%s.yaml"%(options.sa_model_dir, options.JOB)
     if not os.path.isfile(options.adapt_yaml):
         raise Exception('File %s not found'%options.adapt_yaml)
-    if not os.path.isfile(model_params):
-        raise Exception('File %s not found'%model_params)
     
     vars={}
-    vars['adapt_flist']=feats_scp
-    vars['adapt_pdfs']=targets_pdf
+    vars['adapt_flist']=options.feats_scp
+    vars['adapt_pdfs']=options.targets_pdf
     vars['adapt_lr']=0.05
     vars['adapt_momentum']=0.5
-    vars['sa_dir'] = sa_model_dir
+    vars['sa_dir'] = options.sa_model_dir
     vars['JOB'] = options.JOB
 
-    #print vars
-    #print 'Locals: ',locals()   
+    print options.model_pytables
 
     adapt_template = open(options.adapt_yaml, 'r').read()
     adapt_template_str = adapt_template % vars
@@ -79,13 +90,11 @@ def main(args=None):
     f.write(adapt_template_str)
     f.close()
 
-    print 'Building model %s'%model_yaml
+    log.info('Building model %s'%model_yaml)
     train_obj = serial.load_train_file(model_yaml)
-    print 'Loading params from %s'%model_params
-    params = ModelPyTables.pytables_to_params(model_params, name='Model')
+    log.info('Loading params from %s'%options.model_pytables)
+    params = load_params_from_list_of_hdfs(options.model_pytables, options.override)
     train_obj.model.set_params(params)
-
-    #print "Freeze regex is", freeze_regex
 
     model_params = train_obj.model.get_params()    
 
@@ -96,15 +105,15 @@ def main(args=None):
                  params_to_freeze[param] = param
 
     #print params_to_freeze
-    if len(params_to_freeze)==len(model_params):
-        print 'None of the parameters were set to be updated. Freeze list is', params_to_freeze
+    if len(params_to_freeze) == len(model_params):
+        log.warning('None of the parameters were set to be updated. Freeze list is', params_to_freeze)
         exit(0)
  
     train_obj.model.freeze(params_to_freeze.values())
-    print 'Will update those params only: ', train_obj.model.get_params()
+    log.info('Will update those params only: ', train_obj.model.get_params())
     train_obj.main_loop()
     train_obj.model.freeze_set = set([]) #unfreeze so get_params will return all model params
-    print 'Unfreezed params are ', train_obj.model.get_params()
+    log.info('Unfreezed params are ', train_obj.model.get_params())
     
     
 if __name__=="__main__":
