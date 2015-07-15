@@ -7,6 +7,9 @@ import numpy
 import tempfile
 import theano
 import logging
+import shutil
+import re
+import os
 
 from argparse import ArgumentParser
 from theano import function
@@ -101,28 +104,31 @@ def prepare_decoder(decoder_yaml_filepath):
         decoder = Pylearn2KaldiDecoderProvider(model=None, preprocessor=None)
     return decoder
 
-def load_model_params_from_pytables(model_pytables_filepath,
-                                    model_pytables_sd_filepath):
+def load_params_from_list_of_hdfs(files_list, override=True):
+    assert files_list is not None and files_list != "", (
+        "Expected to at least one path hdf with parameters"
+    )
+    files = re.split('[\s,]', files_list)
+    params_list = []
+    for f in files:
+        if not os.path.isfile(f):
+            raise IOError('File %s not found'%f)
+        params_file = serial.load_params_from_pytables(f, container_name=None)
+        params_list.append(params_file)
 
-    params = {}
-    #load general parameters (speaker independent)
-    if model_pytables_filepath is not None:
-        params = serial.load_params_from_pytables(model_pytables_filepath,
-                                                  container_name="Model")
-    #and possibly load also speaker dependent ones, which override the
-    #speaker independent ones when the names are the same
-    if model_pytables_sd_filepath is not None:
-        params_sd = serial.load_params_from_pytables(model_pytables_sd_filepath)
-        for sd_key in params_sd.keys():
-            if sd_key in params.keys():
-                log.warning("Key %s appears in both containers %s and %s."
-                            "Seaker-dependent ones will override "
-                            "speaker-independent in the final model"
-                            %(sd_key, model_pytables_filepath,
-                              model_pytables_sd_filepath))
-            params[sd_key] = params_sd[sd_key]
+    rval = {}
+    for idx, params in enumerate(params_list):
+        for key in params.keys():
+            if key in rval:
+                if override:
+                    log.warning('Overriding param(%s) from (%s) by the one found in (%s)'\
+                                % (key, files[idx-1], files[idx]))
+                else:
+                    raise KeyError("Param %s found in both %s and %s and override is False"\
+                                     % (key, files[idx-1], files[idx]))
+            rval[key] = params[key]
 
-    return params
+    return rval
 
 def prepare_decoding_pipeline(options):
 
@@ -144,11 +150,8 @@ def prepare_decoding_pipeline(options):
             preprocessor = serial.load_train_file(options.prepr_yaml)
         decoder.preprocessor = preprocessor
 
-    if (options.model_pytables is not None) or \
-       (options.model_pytables_sd is not None):
-        params = load_model_params_from_pytables(options.model_pytables,
-                                                 options.model_pytables_sd)
-        #TODO: add cross-check if parameters keys match 1:1 with the model
+    if (options.model_pytables is not None):
+        params = load_params_from_list_of_hdfs(' '.join(options.model_pytables), override=options.override)
         decoder.set_model_params(params)
 
     log_priors = None
@@ -211,11 +214,12 @@ def decoder_loop(buffer, decoder, debug=False):
             #for t in tses:
             #    ts[t] += 1
         else:
-            f=tempfile.SpooledTemporaryFile(max_size=409715200) #keep up to 200MB in memory
+            f=tempfile.SpooledTemporaryFile(max_size=4000000000) #keep up to 3GB in memory
             write_ark_entry_to_buffer(f, uttid, activations)
             f.flush()
             f.seek(0)
-            print f.read()
+            shutil.copyfileobj(f, sys.stdout)
+            #print f.read()
             f.close()
     #numpy.save('ts_30h.dnn.1k', ts)
 
@@ -227,18 +231,17 @@ def main(args=None):
                         help="specify the decoder yaml structure (including seed model) to start with")
     parser.add_argument("--model-pkl", dest="model_pkl", default=None,
                         help="specify the model pickle to be used in forward pass")
-    parser.add_argument("--model-pytables", dest="model_pytables", default=None,
-                        help="specify the pytable file from which weights should be loaded")
-    parser.add_argument("--model-pytables-sd", dest="model_pytables_sd", default=None,
-                        help="specify the pytable file with speaker dependent parameters."
-                           "Note, in case the parameters overlap with --model-pytables"
-                           "the si will be over-ridden by sd.")
+    parser.add_argument("--model-pytables", dest="model_pytables", nargs='+', default=None,
+                        help="specify [a list] of pytable files from which weights should be loaded")
     parser.add_argument("--prepr-yaml", dest="prepr_yaml", default=None,
                         help="Yaml describing feature pipline preprocessors.")
     parser.add_argument("--feats-flist", dest="feats_flist", default=None,
                         help="specify a feats scp to fwd pass (if not specified, Kaldi pipe assumed)")
     parser.add_argument("--priors", dest="priors_path", default=None,
                         help="specify the priors to obtain scaled-likelihoods")
+    parser.add_argument("--override", dest="override", default=True,
+                        help="When specified many files and some parameters have the same name, the ones appearing"
+                           "later in the list will override the former ones.")
     parser.add_argument("--debug", dest="debug", default=False,
                         help="Prints activations and shapes in text format rather than binary Kaldi archives")
     
