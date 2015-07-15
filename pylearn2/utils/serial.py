@@ -447,20 +447,19 @@ def save_params_to_pytables(filepath, params, container_name='params', desc='', 
     def save_pytables(filepath, params, container_name, desc, filters):
         if filters is None:
             filters = tables.Filters(complib='zlib', complevel=1)
+        with tables.open_file(filepath, mode = "w", \
+                              title = "Model parameters: %s"%filepath) as h5file:
+            gcolumns = h5file.create_group(h5file.root, container_name, desc)
 
-        h5file = tables.openFile(filepath, mode = "w", title = "Model parameters: %s"%filepath)
-        gcolumns = h5file.createGroup(h5file.root, container_name, desc)
-
-        for param in params:
-            p_value = param.get_value()
-            p_atom = tables.Atom.from_dtype(p_value.dtype)
-            p_array = h5file.createCArray(gcolumns, param.name, atom = p_atom, shape = p_value.shape,
+            for param in params:
+                p_value = param.get_value()
+                p_atom = tables.Atom.from_dtype(p_value.dtype)
+                p_array = h5file.createCArray(gcolumns, param.name, atom = p_atom, shape = p_value.shape,
                                 title = param.name, filters = filters)
-            p_array[:] = p_value
-            h5file.flush()
-            print 'ModelPyTables: exporting param %s with shape %s and dtype %s'%(param.name, p_value.shape, p_value.dtype)
+                p_array[:] = p_value
+                h5file.flush()
 
-        h5file.close()
+                print 'ModelPyTables: exporting param %s with shape %s and dtype %s'%(param.name, p_value.shape, p_value.dtype)
 
     filepath = preprocess(filepath)
 
@@ -480,19 +479,28 @@ def save_params_to_pytables(filepath, params, container_name='params', desc='', 
     save_pytables(filepath,params, container_name, desc, filters)
 
 
-def load_params_from_pytables(filepath, container_name='params'):
+def load_params_from_pytables(filepath, container_name=None):
     """Returns dictionary {'param_name': value} so the model can appropriately set those parameters back.
     Bear in mind this is just a dictionary of ndarrays. These should be then loaded into an appropriate Theano variables.
     The advantage is theano variables could be easily build for desired backend (GPU, CPU) first"""
 
     params = {}
-    h5file = tables.openFile(filepath, mode = "r")
-    for node in h5file.walkNodes('/%s/'%container_name, "Array"):
-        if params.has_key(node.name):
-            raise KeyError('Key already exists %s'%node.name) #it should not happen, but check anyway
-        params[node.name] = node.read()
-        #print 'ModelPyTables: Lodaing param %s into dictionary (shape is %s and dtype %s)'%\
-        #                                   (node.name, params[node.name].shape, params[node.name].dtype)
-    h5file.close()
+    with tables.open_file(filepath, mode = "r") as h5file:
+        container_names = []
+        if container_name is None:
+            for group in h5file.walk_groups('/'):
+                container_names.append(group._v_name)
+        else:
+            container_names.append(container_name)
+
+        for container_name in container_names:
+            if container_name == '/': continue
+            for node in h5file.walk_nodes('/%s'%container_name, "Array"):
+                if params.has_key(node._v_name):
+                    raise KeyError('Key already exists %s'%node.name) #it should not happen, but check anyway
+                params[node._v_name] = node.read()
+            #print 'ModelPyTables: Lodaing param %s into dictionary (shape is %s and dtype %s)'%\
+            #                                   (node.name, params[node.name].shape, params[node.name].dtype)
+
     return params
 
