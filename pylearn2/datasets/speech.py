@@ -223,11 +223,13 @@ class SpeechDatasetProvider(Dataset):
     """
     def __init__(self,
                  provider,
-                 preprocessor=None):
+                 preprocessor=None,
+                 is_sat=False):
 
         #self.args = locals()
         self.provider = provider
         self.preprocessor = preprocessor
+        self.is_sat=is_sat
 
         # will be instantiated by self.iterator() when asked for
         # by training code
@@ -333,12 +335,13 @@ class SpeechDatasetProvider(Dataset):
         self._cache = Pylearn2CacheSimple(queue=self._queue,
                                           provider=self.provider,
                                           batch_size=batch_size,
-                                          preprocessor=self.preprocessor)
+                                          preprocessor=self.preprocessor,
+                                          is_sat=self.is_sat)
         self._cache.start()
 
         return QueuedDatasetIterator(queue=self._queue,
                                      dataset_size=self.provider.num_examples,
-                                     batch_size=batch_size)
+                                     batch_size=batch_size, is_sat=self.is_sat)
 
     def adjust_for_viewer(self, X):
         """

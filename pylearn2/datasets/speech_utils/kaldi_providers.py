@@ -219,7 +219,8 @@ class KaldiAlignFeatsProviderUtt(KaldiFeatsProviderUtt):
                  max_time=-1,
                  max_utt=-1,
                  frame_shift=10,
-                 mapped=False):
+                 mapped=False,
+                 ret_utt_scps=False):
         """
 
         :param feats_scp:
@@ -246,6 +247,7 @@ class KaldiAlignFeatsProviderUtt(KaldiFeatsProviderUtt):
         self._frame_shift_in_sec = self.frame_shift / 1000.0
         self.utt_skipped = 0
         self._num_examples = 0
+        self.ret_utt_scps = ret_utt_scps
 
         files_info = {}
         for scp_entry in self.files_list:
@@ -371,6 +373,233 @@ class KaldiAlignFeatsProviderUtt(KaldiFeatsProviderUtt):
 
     def get_data_specs(self):
         return self.data_spec
+
+
+class KaldiSATAlignFeatsProviderUtt(KaldiAlignFeatsProviderUtt):
+    """Data provider reading Kaldi archives and returning utterance-based
+    features and associated ground-truth labels from alignment files
+    """
+
+    def __init__(self,
+                 feats_scp,
+                 aligns_scp,
+                 feats_dim,
+                 targets_dim,
+                 utt2spk_map=None,
+                 fake_utt2spk_map=False,
+                 template_shell_command=None,
+                 randomize=False,
+                 max_time=-1,
+                 max_utt=-1,
+                 frame_shift=10,
+                 mapped=False):
+        """
+
+        :param feats_scp:
+        :param aligns_scp:
+        :param template_shell_command:
+        :param randomize:
+        :param max_time:
+        :param max_utt:
+        :param frame_shift:
+        :param mapped:
+        :return: a tuple (features, targets) for a given utterance
+        """
+
+        super(KaldiSATAlignFeatsProviderUtt, self).\
+            __init__(feats_scp=feats_scp,
+                     aligns_scp=aligns_scp,
+                    feats_dim=feats_dim,
+                    targets_dim=targets_dim,
+                    template_shell_command=template_shell_command,
+                    randomize=randomize,
+                    max_time=max_time,
+                    max_utt=max_utt,
+                    frame_shift=frame_shift,
+                    mapped=mapped)
+
+        self.fake_utt2spk_map = fake_utt2spk_map
+
+        if not self.fake_utt2spk_map:
+            assert utt2spk_map is not None
+            self.utt2spk_and_idx = {} #keeps {utt:[spk idx]}
+            spk2idx = {}
+            with open(utt2spk_map, 'r') as f:
+                for line in f:
+                    utt, spk = line.strip().split(None, 1)
+                    if spk not in spk2idx.keys():
+                        if len(spk2idx) == 0:
+                            spk2idx[spk] = 0
+                        else:
+                            spk2idx[spk] = max(spk2idx.values())+1
+                    self.utt2spk_and_idx[utt] = [spk, spk2idx[spk]]
+
+            log.warning('Found %d distinct speakers in data' % len(spk2idx))
+        else:
+            log.warning('Speaker labels will be faked, but data specs'
+                        'will stay compatible with the expected ones for sat interface.')
+
+        feats_space = VectorSpace(dim=self.feats_dim)
+        spk_idx_space = VectorSpace(dim=1)
+        targets_space = VectorSpace(dim=self.targets_dim)
+        self.data_spec = (CompositeSpace([feats_space, spk_idx_space, targets_space]), ('features', 'speaker_indexes', 'targets'))
+
+    def __iter__(self):
+        return self
+
+    def reset(self):
+        super(KaldiSATAlignFeatsProviderUtt, self).reset()
+
+    def next(self):
+
+        try:
+            features, labels = super(KaldiSATAlignFeatsProviderUtt, self).next()
+        except StopIteration:
+            raise StopIteration
+
+        spk_idx_mbatch = None
+        if (features is not None and labels is not None):
+            if self.fake_utt2spk_map:
+                spk_idx_mbatch = numpy.zeros_like(labels)
+            else:
+                utt_path = self.files_list[self.index-1] #ugly way to do so!
+                utt = utt_path.split(" ")[0]
+                spk_idx = self.utt2spk_and_idx[utt][1]
+                spk_idx_mbatch = numpy.ones_like(labels)*spk_idx
+
+        return features, spk_idx_mbatch, labels
+
+    def num_classes(self):
+        return [self.targets_dim]
+
+    @property
+    def num_examples(self):
+        return self._num_examples
+
+    def get_data_specs(self):
+        return self.data_spec
+
+
+class KaldiSeqAlignFeatsProviderUtt(KaldiAlignFeatsProviderUtt):
+    """Data provider reading Kaldi archives and returning utterance-based
+    features and associated ground-truth labels from alignment files
+    """
+
+    def __init__(self,
+                 feats_scp,
+                 aligns_scp,
+                 lat_scp,
+                 feats_dim,
+                 targets_dim,
+                 template_shell_command=None,
+                 randomize=False,
+                 max_time=-1,
+                 max_utt=-1,
+                 frame_shift=10,
+                 mapped=False):
+        """
+
+        :param feats_scp:
+        :param aligns_scp:
+        :param template_shell_command:
+        :param randomize:
+        :param max_time:
+        :param max_utt:
+        :param frame_shift:
+        :param mapped:
+        :return: a tuple (features, targets) for a given utterance
+        """
+
+        super(KaldiSeqAlignFeatsProviderUtt, self).\
+            __init__(feats_scp=feats_scp,
+                     aligns_scp=aligns_scp,
+                    feats_dim=feats_dim,
+                    targets_dim=targets_dim,
+                    template_shell_command=template_shell_command,
+                    randomize=randomize,
+                    max_time=max_time,
+                    max_utt=max_utt,
+                    frame_shift=frame_shift,
+                    mapped=mapped)
+
+        self.lat2idx = {}
+        with open(lat_scp, 'r') as lats:
+            for line in lats:
+                utt, xxx = line.strip().split(None, 1)
+                if utt not in self.lat2idx.keys():
+                    if len(self.lat2idx) == 0:
+                        self.lat2idx[utt] = 0
+                    else:
+                        self.lat2idx[utt] = max(self.lat2idx.values())+1
+
+        fi_set = set(self.files_info.keys())
+        ai_set = set(self.align_info.keys())
+        lat_set = set(self.lat2idx.keys())
+        iset = set.intersection(fi_set, ai_set, lat_set)
+
+        new_files_info, new_align_info, new_lat2idx = {}, {}, {}
+        for k in iset:
+            new_files_info[k] = self.files_info[k]
+            new_align_info[k] = self.align_info[k]
+            new_lat2idx[k] = self.lat2idx[k]
+
+        self.files_info = new_files_info
+        self.align_info = new_align_info
+        self.lat2idx = new_lat2idx
+
+        self._num_examples = self._recount_examples(self.align_info)
+
+        #update file list to resamble the actual intersetion
+        old_list_size = self.list_size
+        new_files_list = []
+        for scp_entry in self.files_list:
+            [utt, path] = scp_entry.split(' ', 1)
+            if utt in self.files_info.keys():
+                new_files_list.append(scp_entry)
+        self.files_list = new_files_list
+        self.list_size = len(self.files_list)
+
+        log.warning("The intersection of features, targets and den-lattices results in %i "
+                    "data-points (in %i utterances, %i skipped)."
+                    % (self._num_examples, self.list_size, old_list_size-self.list_size))
+
+        feats_space = VectorSpace(dim=self.feats_dim)
+        uttid = VectorSpace(dim=1)
+        targets_space = VectorSpace(dim=self.targets_dim)
+        self.data_spec = (CompositeSpace([feats_space, targets_space, uttid]), ('features', 'targets', 'utt_id'))
+
+    def __iter__(self):
+        return self
+
+    def reset(self):
+        super(KaldiSeqAlignFeatsProviderUtt, self).reset()
+
+    def next(self):
+
+        try:
+            features, labels = super(KaldiSeqAlignFeatsProviderUtt, self).next()
+        except StopIteration:
+            raise StopIteration
+
+        utt_id = None
+        if (features is not None and labels is not None):
+            utt_path = self.files_list[self.index-1] #ugly way to do so!
+            utt = utt_path.split(" ")[0]
+            if utt in self.lat2idx.keys():
+                utt_id = self.lat2idx[utt]
+
+        return features, labels, utt_id
+
+    def num_classes(self):
+        return [self.targets_dim]
+
+    @property
+    def num_examples(self):
+        return self._num_examples
+
+    def get_data_specs(self):
+        return self.data_spec
+
 
 
 class FrameShuffler(object):
@@ -649,6 +878,7 @@ class SequenceKaldiAlignFeatsProviderUtt(KaldiFeatsProviderUtt):
 
         except StopIteration:
             raise StopIteration
+
 
 class MultiStreamCall(Process):
     def __init__(self, thread_id, in_queue, out_queue):

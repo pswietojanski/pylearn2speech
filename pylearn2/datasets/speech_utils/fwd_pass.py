@@ -20,6 +20,7 @@ from pylearn2.datasets.preprocessing_speech import OnlinePreprocessor
 from pylearn2.datasets.speech_utils.kaldi_providers import read_ark_entry_from_buffer, write_ark_entry_to_buffer
 from pylearn2.utils import serial, sharedX
 
+logging.warning('Starting logger for kaldi_fwdpass.py')
 log = logging.getLogger(__name__)
 
 

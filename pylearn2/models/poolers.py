@@ -1998,13 +1998,287 @@ class MultiplicativeAdapter(Layer):
         elif self.constraint == "exp":
             amp = T.exp(self.u)
         elif self.constraint == "relu":
-            amp = T.maximum(0.0, self.relu)
+            amp = T.maximum(0.0, self.u)
         else:
             amp = self.u
 
         a = z*amp
 
         a.name = "_a_"
+
+        return a
+
+
+class SATDataInputSpaceConverter(Layer):
+    def __init__(self, layer_name='sat_mapper'):
+        self.__dict__.update(locals())
+        del self.self
+
+    def get_lr_scalers(self):
+        rval = OrderedDict()
+        return rval
+
+    def get_monitoring_channels(self):
+        return OrderedDict()
+
+    def get_input_source(self):
+        return 'features', 'speaker_indexes'
+
+    def set_input_space(self, space):
+
+        self.input_space = space
+
+        if isinstance(space, VectorSpace):
+            self.requires_reformat = False
+            self.input_dim = space.dim
+        else:
+            self.requires_reformat = True
+            self.feature_space = space.restrict([0])
+            self.input_dim =  self.feature_space.get_total_dimension()
+            self.desired_space = VectorSpace(self.input_dim)
+
+        self.output_space = VectorSpace(self.input_dim)
+
+    def get_weights_topo(self):
+        raise NotImplementedError()
+
+    def get_weights(self):
+        raise NotImplementedError()
+
+    def censor_updates(self, updates):
+        return OrderedDict()
+
+    def get_params(self):
+        return []
+
+    def fprop(self, state_below):
+
+        print 'Input space expected by converter ', self.input_space
+        print 'Actual input state ', state_below
+        self.input_space.validate(state_below)
+        if self.requires_reformat:
+            state_below = self.input_space.restrict_batch(state_below, [0])
+        self.output_space.validate(state_below)
+        print 'Output space ', self.output_space
+        print 'Output state ', state_below
+        return state_below
+
+
+class SATDataInputConcSpaceConverter(Layer):
+    def __init__(self, layer_name='sat_mapper', num_dims_to_cut=1):
+        assert num_dims_to_cut > 0
+        self.__dict__.update(locals())
+        del self.self
+
+    def get_lr_scalers(self):
+        rval = OrderedDict()
+        return rval
+
+    def get_monitoring_channels(self):
+        return OrderedDict()
+
+    def get_input_source(self):
+        return 'features'
+
+    def set_input_space(self, space):
+
+        self.input_space = space
+
+        if isinstance(space, VectorSpace):
+            self.requires_reformat = False
+            self.input_dim = space.dim
+        else:
+            self.requires_reformat = True
+            self.feature_space = space.restrict([0])
+            self.input_dim =  self.feature_space.get_total_dimension()
+            self.desired_space = VectorSpace(self.input_dim)
+
+        self.output_space = VectorSpace(self.input_dim-self.num_dims_to_cut)
+
+        print 'Input dim ', self.input_dim
+        print 'Output dim ', self.output_space.dim
+
+    def get_weights_topo(self):
+        raise NotImplementedError()
+
+    def get_weights(self):
+        raise NotImplementedError()
+
+    def censor_updates(self, updates):
+        return OrderedDict()
+
+    def get_params(self):
+        return []
+
+    def fprop(self, state_below):
+
+        self.input_space.validate(state_below)
+        if self.requires_reformat:
+            state_below = self.input_space.restrict_batch(state_below, [0])
+        z = state_below[:,0:-self.num_dims_to_cut]
+        self.output_space.validate(z)
+        return z
+
+
+class MultiplicativeSATAdapter(Layer):
+    """
+    This code was used for speaker adaptation experiments
+    for large vocabulary speech recognition in the following paper:
+
+    Learning Hidden Unit Contributions for Unsupervised
+    Adaptation of Neural Network Acoustic Models,
+    Swietojanski and Renals, IEEE SLT, 2014
+
+    This isn't really a pooling operator, but was used in a similar
+    context (for adaptation) hence the code it's here.
+    """
+    def __init__(self, layer_name,
+                       num_speakers,
+                       irange=None,
+                       u_lr_scale=None,
+                       constraint='sigmoid',
+                       si_fprop_mode='unit_gain',
+                       decoding=False):
+        """
+            layer_name: a layer name that will be
+            irange: if specified, the initial multipliers will be randomly
+                    selected from U(-irange, irange)
+            u_lr_scale: learning rate scaling for u w.r.t the main learning
+                    rate
+            decoding: once the model is trained, u is fixed as such there is
+                    no need to evaluate simgoid(u) for each example
+        """
+
+        assert constraint in ['sigmoid', 'exp', 'relu', 'none']
+        assert si_fprop_mode in ['unit_gain', 'sat_avg', 'sat_avg_norm']
+        assert num_speakers > 0, (
+            "For training, num_speakers is expected to be equal to"
+            "the number of speakers found in training data."
+        )
+
+        self.__dict__.update(locals())
+        del self.self
+
+    def get_lr_scalers(self):
+
+        rval = OrderedDict()
+
+        if not hasattr(self, 'u_lr_scale'):
+            self.u_lr_scale = None
+
+        if self.u_lr_scale is not None:
+            rval[self.u] = self.u_lr_scale
+
+        return rval
+
+    def get_monitoring_channels(self):
+
+        return OrderedDict([
+                            ('u_min', self.u.min()),
+                            ('u_mean', self.u.mean()),
+                            ('u_max', self.u.max()),
+                            ])
+
+    def set_input_space(self, space):
+
+        self.input_space = space
+
+        if isinstance(space, VectorSpace):
+            self.requires_reformat = False
+            self.input_dim = space.dim
+        else:
+            self.requires_reformat = True
+            self.input_dim = space.get_total_dimension()
+            self.desired_space = VectorSpace(self.input_dim)
+
+        self.output_space = VectorSpace(self.input_dim)
+
+        if self.irange is not None:
+            u = np.random.uniform(-self.irange, +self.iragne,
+                                    (self.num_speakers + 1, self.input_dim), dtype=config.floatX)
+        else:
+            if self.constraint in ['sigmoid', 'exp']:
+                offset = 0.0
+            else:
+                offset = 1.0
+            u = np.zeros((self.num_speakers + 1, self.input_dim), dtype=config.floatX) + offset
+
+        self.u = sharedX(u, name=self.layer_name+'_u')
+
+    def get_weights_topo(self):
+        raise NotImplementedError()
+
+    def get_weights(self):
+        raise NotImplementedError()
+
+    def censor_updates(self, updates):
+        return OrderedDict()
+
+    def get_params(self):
+        assert self.u.name is not None
+
+        rval = []
+        rval.append(self.u)
+
+        return rval
+
+    def fprop(self, state_below):
+
+        self.input_space.validate(state_below)
+
+        if self.requires_reformat:
+            state_below = self.input_space.format_as(state_below, self.desired_space)
+
+        self.output_space.validate(state_below)
+
+        z = state_below
+
+        if self.constraint == "sigmoid":
+            amp = 2*T.nnet.sigmoid(self.u)
+        elif self.constraint == "exp":
+            amp = T.exp(self.u)
+        elif self.constraint == "relu":
+            amp = T.maximum(0.0, self.u)
+        else:
+            amp = self.u
+
+        #for now, in case of si frop, we simply multiply it by 1.0
+        #the last element in u is reserved for this
+        if self.si_fprop_mode == 'sat_avg':
+            amp = T.mean(amp, axis=0)
+        elif self.si_fprop_mode == 'sat_avg_norm':
+            amp = T.mean(amp, axis=0)
+        else:
+            amp = amp[-1,:]
+
+        a = z*amp
+
+        a.name = "_a_"
+
+        return a
+
+    def fprop_sat(self, state_below, spk_idx):
+
+        self.input_space.validate(state_below)
+        if self.requires_reformat:
+            state_below = self.input_space.format_as(state_below, self.desired_space)
+
+        s = self.u[T.cast(spk_idx, dtype='int32'), :]
+        #s = self.u[-1, :]
+        if self.constraint == "sigmoid":
+            amp = 2*T.nnet.sigmoid(s)
+        elif self.constraint == "exp":
+            amp = T.exp(s)
+        elif self.constraint == "relu":
+            amp = T.maximum(0.0, s)
+        else:
+            amp = s
+
+        a = state_below*amp
+
+        a.name = "_a_"
+
+        self.output_space.validate(a)
 
         return a
 

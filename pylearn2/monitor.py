@@ -200,7 +200,7 @@ class Monitor(object):
             if isinstance(d, basestring):
                 d = yaml_parse.load(d)
                 raise NotImplementedError()
-                # need to put d back into self._datasets
+                # need to put d back into self._datasetsq
             myiterator = d.iterator(mode=i,
                                     batch_size=b,
                                     num_batches=n,
@@ -221,8 +221,7 @@ class Monitor(object):
                 actual_ne = 0
                 for X in myiterator:
                     # X is a flat (not nested) tuple
-                    #for x in X:
-                    #    print x.shape
+                    #X = self._data_specs_mapping.flatten(X, return_tuple=True)
                     self.run_prereqs(X, d)
                     a(*X)
                     actual_ne += self._flat_data_specs[0].np_batch_size(X)

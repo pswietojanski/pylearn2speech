@@ -53,7 +53,8 @@ class Pylearn2CacheSimple(Pylearn2Cache):
                  queue,
                  provider,
                  batch_size,
-                 preprocessor=None):
+                 preprocessor=None,
+                 is_sat=False):
 
         super(Pylearn2CacheSimple, self).\
             __init__(queue=queue,
@@ -66,6 +67,7 @@ class Pylearn2CacheSimple(Pylearn2Cache):
         self.provider = BufferedProviderDataSpec(provider, batch_size)
         self.lfreq = 2 ** 20  # print progress/efficiency stats after 1M examples
         self.num_classes = self.provider.num_classes()
+        self.is_sat = is_sat
 
     def run(self):
 
@@ -90,22 +92,38 @@ class Pylearn2CacheSimple(Pylearn2Cache):
             else:
                 data, y = xy
 
-            if isinstance(y, (list, tuple)):
-                assert isinstance(self.num_classes, (list, tuple)) and \
-                       len(y) == len(self.num_classes), (
-                    "Specified %i labels streams but provided " \
-                    " only %i target dimensions. Specify n_classes" \
-                    " as a list with one element per target stream." \
-                    % (len(y), len(self.num_classes))
-                )
-                rval_y = [self.convert_to_one_hot(yel, self.num_classes[idx], 0) \
+            if self.is_sat is False:
+                if isinstance(y, (list, tuple)):
+                    assert isinstance(self.num_classes, (list, tuple)) and \
+                           len(y) == len(self.num_classes), (
+                        "Specified %i labels streams but provided " \
+                        " only %i target dimensions. Specify n_classes" \
+                        " as a list with one element per target stream." \
+                        % (len(y), len(self.num_classes))
+                    )
+                    rval_y = [self.convert_to_one_hot(yel, self.num_classes[idx], 0) \
                           for yel, idx in zip(y, xrange(len(y)))]
-                new_y = tuple(rval_y)
+                    new_y = tuple(rval_y)
+                else:
+                    rval_y = self.convert_to_one_hot(y, self.num_classes[0], 0)
+                    new_y = tuple([rval_y])
             else:
-                rval_y = self.convert_to_one_hot(y, self.num_classes[0], 0)
-                new_y = tuple([rval_y])
+                assert len(y) == 2, (
+                    "For sat training expected to get length 2 (speaker_indexes, labels) got %f "%len(y)
+                )
+                rval_y = self.convert_to_one_hot(y[1], self.num_classes[0], 0)
+                new_y = (y[0], rval_y)
+
 
             rval = (data,) + new_y
+
+            #if self.is_sat is True: #SAT hack
+            #    assert len(rval) == 3, (
+            #        "For sat training expected to get a tuple (data, speaker_indexes, labels) "
+            #        "but got something of length %f. Note, it is supposed to be converted to"
+            #        "((data, spk_idx), labels) "%len(rval)
+            #    )
+            #    rval = ((rval[0], rval[1]), rval[2])
 
             texamples += self.provider.batch_size
             if texamples % self.lfreq == 0:

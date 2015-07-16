@@ -500,7 +500,7 @@ class QueuedDatasetIterator(object):
     2) We want to do all conversions/dimshuffles/preprocessors in caching object 
       (which is a separate process and applies that in parallel to learning code)
     """
-    def __init__(self, queue, dataset_size, batch_size, num_batches=None, data_specs=None, return_tuple=True):
+    def __init__(self, queue, dataset_size, batch_size, num_batches=None, data_specs=None, return_tuple=True, is_sat=False):
         self._queue = queue
         self._return_tuple = return_tuple
         self.data_specs = data_specs
@@ -510,6 +510,7 @@ class QueuedDatasetIterator(object):
         self._num_examples = self._num_batches*self._batch_size
         self._num_examples_from_queue = 0
         self._num_batches_from_queue = 0
+        self.sat_hack_conc = is_sat
                 
     @property
     def batch_size(self):
@@ -553,8 +554,15 @@ class QueuedDatasetIterator(object):
         if not self._return_tuple and len(rval) == 1:
             rval, = rval
 
-        self._num_examples_from_queue += rval[0].shape[0]
-        self._num_examples_from_queue += 1
+        if self.sat_hack_conc:
+            assert len(rval) == 3, (
+                "This ugly hack assumes SAT provider will feed the queue with (data, spk, labels)"
+                "format, which will then be formatted into desired concatenated format that"
+                "model input space is expected to get"
+            )
+            features, spk_idx_mbatch, labels = rval
+            features = numpy.asarray(numpy.concatenate((features, spk_idx_mbatch.reshape(-1,1)), axis=1), dtype=numpy.float32)
+            rval = (features, labels)
 
         return rval
     

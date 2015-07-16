@@ -22,6 +22,7 @@ if [ $# == 0 ] ; then
   echo '--numlib - atlas or mkl or none (default). Sets some sensible default libraries to use. Modification of these may be required.'
   echo '--async - makes the GPU computations asynchronous'
   echo '--cnn-conf - provide a cnn conf to source '
+  echo '--profile - run in profile mode'
   echo '----------------------------------------------------------'
   
   exit 0
@@ -41,6 +42,7 @@ LONG_JOB=0
 NOHUP=""
 WAIT_TIME=2 #in minutes
 MODE=FAST_RUN
+PROFILE=False
 USE_SGE=0
 TMP_COMPILE=0
 NUMLIB=
@@ -49,6 +51,7 @@ ASYNC=True #will be set allow_gc=$ASYNC. False results in asynchronous mode
 CNN_CONF=""
 OMP_NUM_THREADS=1
 USE_OPENMP=False
+USE_CUDNN=0
 #---------
 
 while [ $# -gt 0 ]; do
@@ -66,6 +69,8 @@ while [ $# -gt 0 ]; do
     --numlib) shift; NUMLIB=$1; shift;;
     --async) ASYNC=False; shift ;;
     --cnn-conf) shift; CNN_CONF=$1; shift;;
+    --use-cudnn) USE_CUDNN=1; shift;;
+    --profile) PROFILE=True; shift;;
     -*)  echo "Unknown argument: $1, exiting"; echo -e $usage; exit 1 ;;
     *)   break ;;   # end of options: interpreted as python script to run
   esac
@@ -125,8 +130,12 @@ if [ $OMP_NUM_THREADS -gt 1 ]; then
   USE_OPENMP=True
 fi
 
-THEANO_FLAGS="device=$DEVICE, openmp=$USE_OPENMP, floatX=float32, force_device=True, print_active_device=False, nvcc.fastmath=True, exception_verbosity=high, mode=$MODE, allow_gc=$ASYNC"
+THEANO_FLAGS="device=$DEVICE, openmp=$USE_OPENMP, floatX=float32, force_device=True, print_active_device=False, nvcc.fastmath=True, exception_verbosity=high, profile=$PROFILE, allow_gc=$ASYNC"
 THEANO_FLAGS="$THEANO_FLAGS, blas.ldflags=$NUMFLAGS"
+
+if [ $USE_CUDNN -eq 1 ]; then
+  THEANO_FLAGS="$THEANO_FLAGS, optimizer_including=cudnn"
+fi
 
 if [ "$MODE" == "PROFILE_MODE" ]; then
   export CUDA_LAUNCH_BLOCKING=1

@@ -21,6 +21,8 @@ from theano.compat.python2x import OrderedDict
 from theano.gof.op import get_debug_values
 from theano.printing import Print
 from theano.sandbox.rng_mrg import MRG_RandomStreams
+from theano.sandbox.cuda.dnn import dnn_available, dnn_pool
+from theano.tensor.signal.downsample import max_pool_2d
 from theano.gradient import consider_constant
 import theano.tensor as T
 
@@ -242,6 +244,12 @@ class MLP(Layer):
     def get_target_source(self):
         return self.layers[-1].get_target_source()
 
+    def get_input_space(self):
+        return self.layers[0].get_input_space()
+
+    def get_input_source(self):
+        return self.layers[0].get_input_source()
+
     def _update_layer_input_spaces(self):
         """
             Tells each layer what its input space should be.
@@ -337,11 +345,12 @@ class MLP(Layer):
                     continue
                     #raise Exception('Parameter %s not found in %s'%(param.name, str(params_dict)))
                 assert param.get_value().shape == params_dict[param.name].shape, (
-                    "Parameter " + str(param.name) + " was created with shape " + \
-                    + str(param.get_value().shape) + \
-                    " so cannot set values with shape " + str(params_dict[param.name].shape)
+                    "Parameter %s was created with shape %s so cannot set values with shape %s."%\
+                    (param.name, param.get_value().shape, params_dict[param.name].shape)
                 )
                 param.set_value(params_dict[param.name], borrow=False)
+                #if param.get_value().shape == params_dict[param.name].shape:
+                #    param.set_value(params_dict[param.name], borrow=False)
                 #print 'Swapping %s'%param.name
 
 
@@ -540,6 +549,24 @@ class MLP(Layer):
                     state_below = T.switch(s_mask, state_below * scale,
                                            layer.dropout_input_mask_value)
             state_below = layer.fprop(state_below)
+
+        return state_below
+
+    def fprop_sat(self, state_below, spk_idx):
+
+        found_sat_components = False
+        print 'State below in the cost ', state_below
+        for layer in self.layers:
+            if hasattr(layer, 'fprop_sat'):
+                state_below = layer.fprop_sat(state_below, spk_idx)
+                found_sat_components = True
+            else:
+                state_below = layer.fprop(state_below)
+
+        assert found_sat_components is True, (
+            "The cost involves cluster adaptive training but none of the layers "
+            "in the model seem to implement fprop_sat method."
+        )
 
         return state_below
 
@@ -1266,460 +1293,6 @@ class SoftmaxPool(Layer):
 
         return p
 
-class CICDSoftmax(Layer):
-    """
-    A context-dependent-independent softmax layer
-    """
-    def __init__(self,
-                 layer_name,
-                 cd_n_classes,
-                 ci_n_classes,
-                 prediction_mode=False,
-                 ci_to_cd_nonlinearity=None,
-                 zero_M_grad_for_cd=False,
-                 learn_C = True,
-                 ci_cost_scaler=0.3,
-                 costs_as_tuple=False,
-                 low_rank=None,
-                 irange=None,
-                 irange_C=None,
-                 istdev=None,
-                 sparse_init=None,
-                 W_lr_scale=None,
-                 C_lr_scale=None,
-                 M_lr_scale=None,
-                 b_lr_scale=None,
-                 m_lr_scale=None,
-                 max_row_norm=None,
-                 max_col_norm=None,
-                 M_max_row_norm=None,
-                 M_max_col_norm=None,
-                 C_max_row_norm=None,
-                 C_max_col_norm=None):
-        """
-        """
-
-        if isinstance(W_lr_scale, str):
-            W_lr_scale = float(W_lr_scale)
-
-        if isinstance(C_lr_scale, str):
-            assert learn_C is True, (
-                "learn_C must be True to be able to use C_lr_scale parameter"
-            )
-            C_lr_scale = float(C_lr_scale)
-
-        if isinstance(M_lr_scale, str):
-            M_lr_scale = float(M_lr_scale)
-
-        if isinstance(b_lr_scale, str):
-            b_lr_scale = float(b_lr_scale)
-
-        if isinstance(m_lr_scale, str):
-            m_lr_scale = float(m_lr_scale)
-
-        assert ci_to_cd_nonlinearity in ['softmax', 'sigmoid', 'relu', 'tanh', 'lin', 'None', None]
-
-        if ci_to_cd_nonlinearity == 'None' or ci_to_cd_nonlinearity is None:
-            ci_to_cd_nonlinearity = 'lin'
-
-        self.__dict__.update(locals())
-        del self.self
-
-        assert isinstance(cd_n_classes, py_integer_types)
-        assert isinstance(ci_n_classes, py_integer_types)
-
-        if self.prediction_mode:
-            self.output_space = VectorSpace(cd_n_classes)
-        else:
-            self.output_space = CompositeSpace((VectorSpace(cd_n_classes),
-                                                VectorSpace(ci_n_classes)))
-
-    def get_target_source(self):
-        if self.prediction_mode:
-            return 'targets'
-        else:
-            return 'targets_cd', 'targets_ci'
-
-    def get_output_space(self):
-        return self.output_space
-
-    def get_lr_scalers(self):
-
-        rval = OrderedDict()
-
-        if self.W_lr_scale is not None:
-            assert isinstance(self.W_lr_scale, float)
-            rval[self.W] = self.W_lr_scale
-
-        if self.M_lr_scale is not None:
-            assert isinstance(self.M_lr_scale, float)
-            rval[self.M] = self.M_lr_scale
-
-        if self.C_lr_scale is not None:
-            assert isinstance(self.C_lr_scale, float)
-            rval[self.C] = self.C_lr_scale
-
-        if not hasattr(self, 'b_lr_scale'):
-            self.b_lr_scale = None
-
-        if self.b_lr_scale is not None:
-            assert isinstance(self.b_lr_scale, float)
-            rval[self.b] = self.b_lr_scale
-
-        if not hasattr(self, 'm_lr_scale'):
-            self.m_lr_scale = None
-
-        if self.m_lr_scale is not None:
-            assert isinstance(self.m_lr_scale, float)
-            rval[self.m] = self.m_lr_scale
-
-        return rval
-
-    def get_monitoring_channels(self):
-
-        W = self.W
-        assert W.ndim == 2
-        sq_W = T.sqr(W)
-        row_norms = T.sqrt(sq_W.sum(axis=1))
-        col_norms = T.sqrt(sq_W.sum(axis=0))
-
-        M = self.M
-        assert M.ndim == 2
-        sq_M = T.sqr(M)
-        M_row_norms = T.sqrt(sq_M.sum(axis=1))
-        M_col_norms = T.sqrt(sq_M.sum(axis=0))
-
-        C = self.C
-        assert C.ndim == 2
-        sq_C = T.sqr(C)
-        C_row_norms = T.sqrt(sq_C.sum(axis=1))
-        C_col_norms = T.sqrt(sq_C.sum(axis=0))
-
-        return OrderedDict([
-                            ('row_norms_min'  , row_norms.min()),
-                            ('row_norms_mean' , row_norms.mean()),
-                            ('row_norms_max'  , row_norms.max()),
-                            ('col_norms_min'  , col_norms.min()),
-                            ('col_norms_mean' , col_norms.mean()),
-                            ('col_norms_max'  , col_norms.max()),
-                            ('M_row_norms_min'  , M_row_norms.min()),
-                            ('M_row_norms_mean' , M_row_norms.mean()),
-                            ('M_row_norms_max'  , M_row_norms.max()),
-                            ('M_col_norms_min'  , M_col_norms.min()),
-                            ('M_col_norms_mean' , M_col_norms.mean()),
-                            ('M_col_norms_max'  , M_col_norms.max()),
-                            ('C_row_norms_min'  , C_row_norms.min()),
-                            ('C_row_norms_mean' , C_row_norms.mean()),
-                            ('C_row_norms_max'  , C_row_norms.max()),
-                            ('C_col_norms_min'  , C_col_norms.min()),
-                            ('C_col_norms_mean' , C_col_norms.mean()),
-                            ('C_col_norms_max'  , C_col_norms.max()),
-                            ])
-
-    def get_monitoring_channels_from_state(self, state, target=None):
-
-        rval = OrderedDict()
-
-        if isinstance(state, (list, tuple)):
-
-            assert len(state) == 2
-
-            state_cd = state[0]
-            state_ci = state[1]
-
-            mx_cd = state_cd.max(axis=1)
-            mx_ci = state_ci.max(axis=1)
-
-            rval =  OrderedDict([
-                ('cd_mean_max_class' , mx_cd.mean()),
-                ('cd_max_max_class' , mx_cd.max()),
-                ('cd_min_max_class' , mx_cd.min()),
-                ('ci_mean_max_class' , mx_ci.mean()),
-                ('ci_max_max_class' , mx_ci.max()),
-                ('ci_min_max_class' , mx_ci.min())
-            ])
-
-            if target is not None:
-
-                target_cd, target_ci = target
-
-                y_hat_cd = T.argmax(state_cd, axis=1)
-                y_cd = T.argmax(target_cd, axis=1)
-                misclass = T.neq(y_cd, y_hat_cd).mean()
-                misclass = T.cast(misclass, config.floatX)
-                rval['misclass'] = misclass
-                rval['nll'] = self._cost_partial(Y_hat=state_cd, Y=target_cd)
-
-                y_hat_ci = T.argmax(state_ci, axis=1)
-                y_ci = T.argmax(target_ci, axis=1)
-                misclass = T.neq(y_ci, y_hat_ci).mean()
-                misclass = T.cast(misclass, config.floatX)
-                rval['misclass_ci'] = misclass
-                rval['nll_ci'] = self._cost_partial(Y_hat=state_ci, Y=target_ci)
-        else:
-
-            mx_cd = state.max(axis=1)
-
-            rval =  OrderedDict([
-                ('cd_mean_max_class' , mx_cd.mean()),
-                ('cd_max_max_class' , mx_cd.max()),
-                ('cd_min_max_class' , mx_cd.min()),
-            ])
-
-            if target is not None:
-
-                y_hat_cd = T.argmax(state, axis=1)
-                y_cd = T.argmax(target, axis=1)
-                misclass = T.neq(y_cd, y_hat_cd).mean()
-                misclass = T.cast(misclass, config.floatX)
-                rval['misclass'] = misclass
-                rval['nll'] = self._cost_partial(Y_hat=state, Y=target)
-
-        return rval
-
-    def set_input_space(self, space):
-        self.input_space = space
-
-        if not isinstance(space, Space):
-            raise TypeError("Expected Space, got "+
-                    str(space)+" of type "+str(type(space)))
-
-        self.input_dim = space.get_total_dimension()
-        self.needs_reformat = not isinstance(space, VectorSpace)
-
-        self.desired_space = VectorSpace(self.input_dim)
-
-        if not self.needs_reformat:
-            assert self.desired_space == self.input_space
-
-        rng = self.mlp.rng
-
-        if self.irange is not None:
-            assert self.istdev is None
-            assert self.sparse_init is None
-            W = rng.uniform(-self.irange,self.irange, (self.input_dim, self.cd_n_classes))
-            M = rng.uniform(-self.irange,self.irange, (self.input_dim, self.ci_n_classes))
-            if self.irange_C is not None:
-                C = rng.uniform(-self.irange_C,self.irange_C, (self.ci_n_classes, self.cd_n_classes))
-            else:
-                C = np.zeros((self.ci_n_classes, self.cd_n_classes))
-        elif self.istdev is not None:
-            assert self.sparse_init is None
-            W = rng.randn(self.input_dim, self.n_classes) * self.istdev
-        else:
-            assert self.sparse_init is not None
-            W = np.zeros((self.input_dim, self.n_classes))
-            for i in xrange(self.n_classes):
-                for j in xrange(self.sparse_init):
-                    idx = rng.randint(0, self.input_dim)
-                    while W[idx, i] != 0.:
-                        idx = rng.randint(0, self.input_dim)
-                    W[idx, i] = rng.randn()
-
-        self.W = sharedX(W,  'softmax_W' )
-        self.C = sharedX(C,  'softmax_C' )
-        self.M = sharedX(M,  'softmax_M' )
-
-        self.b = sharedX(np.zeros((self.cd_n_classes,)), "softmax_b")
-        self.m = sharedX(np.zeros((self.ci_n_classes,)), "softmax_m")
-
-        self._params = [ self.b, self.m, self.W, self.M]
-        if self.learn_C:
-            self._params.append(self.C)
-
-    def get_weights_topo(self):
-        if not isinstance(self.input_space, Conv2DSpace):
-            raise NotImplementedError()
-        desired = self.W.get_value().T
-        ipt = self.desired_space.format_as(desired, self.input_space)
-        rval = Conv2DSpace.convert_numpy(ipt, self.input_space.axes, ('b', 0, 1, 'c'))
-        return rval
-
-    def get_weights(self):
-        raise NotImplementedError()
-
-    def set_weights(self, weights):
-        raise NotImplementedError()
-
-    def set_biases(self, biases):
-        raise NotImplementedError()
-
-    def get_biases(self):
-        raise NotImplementedError()
-
-    def get_weights_format(self):
-        return ('v', 'h')
-
-    def fprop(self, state_below):
-
-        self.input_space.validate(state_below)
-
-        if self.needs_reformat:
-            state_below = self.input_space.format_as(state_below, self.desired_space)
-
-        self.desired_space.validate(state_below)
-        assert state_below.ndim == 2
-
-        assert self.W.ndim == 2
-        assert self.M.ndim == 2
-        assert self.C.ndim == 2
-        assert hasattr(self, 'ci_to_cd_nonlinearity')
-        assert hasattr(self, 'zero_M_grad_for_cd')
-        assert hasattr(self, 'prediction_mode')
-
-        b = self.b
-        m = self.m
-
-        if self.zero_M_grad_for_cd:
-            M = T.dot(state_below, consider_constant(self.M)) + consider_constant(m)
-        else:
-            M = T.dot(state_below, self.M) + m
-
-        if self.ci_to_cd_nonlinearity == 'softmax':
-            MO = T.nnet.softmax(M)
-        elif self.ci_to_cd_nonlinearity == 'sigmoid':
-            MO = T.nnet.sigmoid(M)
-        elif self.ci_to_cd_nonlinearity == 'relu':
-            MO = T.maximum(0, M)
-        elif self.ci_to_cd_nonlinearity == 'tanh':
-            MO = T.tanh(M)
-        else:
-            MO = M
-
-        if self.learn_C:
-            Z = T.dot(state_below, self.W) + T.dot(MO, self.C) + b
-        else:
-            Z = T.dot(state_below, self.W) + b
-
-        rval_cd = T.nnet.softmax(Z)
-        if self.prediction_mode is True:
-            return rval_cd
-        else:
-            if self.ci_to_cd_nonlinearity == 'softmax':
-                rval_m = MO
-            else:
-                rval_m = T.nnet.softmax(M)
-            return rval_cd, rval_m
-
-    def cost(self, Y, Y_hat):
-        """
-        Y must be one-hot binary. Y_hat is a softmax estimate.
-        of Y. Returns negative log probability of Y under the Y_hat
-        distribution.
-        """
-
-        if self.prediction_mode:
-            #this is for testing purposes, training
-            #in pred mode simplifies this to single task
-            #mutli-class prediction
-            rval = self._cost_partial(Y, Y_hat)
-        else:
-
-            Y_cd, Y_ci = Y
-            Y_hat_cd, Y_hat_ci = Y_hat
-
-            rval_cd = self._cost_partial(Y_cd, Y_hat_cd)
-            rval_ci = self._cost_partial(Y_ci, Y_hat_ci)
-
-            if self.costs_as_tuple:
-                rval = (rval_cd, rval_ci)
-            else:
-                rval = (1-self.ci_cost_scaler)*rval_cd \
-                       + self.ci_cost_scaler*rval_ci
-
-        return rval
-
-    def _cost_partial(self, Y, Y_hat):
-
-        assert hasattr(Y_hat, 'owner')
-
-        #get inputs for cd task
-        owner = Y_hat.owner
-        assert owner is not None
-        op = owner.op
-        if isinstance(op, Print):
-            assert len(owner.inputs) == 1
-            Y_hat, = owner.inputs
-            owner = Y_hat.owner
-            op = owner.op
-        assert isinstance(op, T.nnet.Softmax)
-        z ,= owner.inputs
-        assert z.ndim == 2
-
-        z = z - z.max(axis=1).dimshuffle(0, 'x')
-        log_prob = z - T.log(T.exp(z).sum(axis=1).dimshuffle(0, 'x'))
-        # we use sum and not mean because this is really one variable per row
-        log_prob_of = (Y * log_prob).sum(axis=1)
-        assert log_prob_of.ndim == 1
-
-        rval = log_prob_of.mean()
-
-        return -rval
-
-    #def cost_from_X(self, data):
-    #    """
-    #    Computes self.cost, but takes data=(X, Y) rather than Y_hat as an argument.
-    #    This is just a wrapper around self.cost that computes Y_hat by
-    #    calling Y_hat = self.fprop(X)
-    #    """
-    #    self.cost_from_X_data_specs()[0].validate(data)
-    #    X, Y = data
-    #    Y_hat = self.fprop(X)
-    #    return self.cost(Y, Y_hat)
-
-
-    def get_weight_decay(self, coeff):
-        if isinstance(coeff, str):
-            coeff = float(coeff)
-        assert isinstance(coeff, float) or hasattr(coeff, 'dtype')
-        return coeff * T.sqr(self.W).sum()
-
-    def get_l1_weight_decay(self, coeff):
-        if isinstance(coeff, str):
-            coeff = float(coeff)
-        assert isinstance(coeff, float) or hasattr(coeff, 'dtype')
-        W = self.W
-        return coeff * abs(W).sum()
-
-    def censor_updates(self, updates):
-        if self.max_row_norm is not None:
-            W = self.W
-            if W in updates:
-                updated_W = updates[W]
-                row_norms = T.sqrt(T.sum(T.sqr(updated_W), axis=1))
-                desired_norms = T.clip(row_norms, 0, self.max_row_norm)
-                updates[W] = updated_W * (desired_norms / (1e-7 + row_norms)).dimshuffle(0, 'x')
-        if self.max_col_norm is not None:
-            assert self.max_row_norm is None
-            W = self.W
-            if W in updates:
-                updated_W = updates[W]
-                col_norms = T.sqrt(T.sum(T.sqr(updated_W), axis=0))
-                desired_norms = T.clip(col_norms, 0, self.max_col_norm)
-                updates[W] = updated_W * (desired_norms / (1e-7 + col_norms))
-
-        if self.M_max_row_norm is not None:
-            raise NotImplementedError('Row max norm not implemented for M')
-        if self.M_max_col_norm is not None:
-            assert self.M_max_row_norm is None
-            M = self.M
-            if M in updates:
-                updated_M = updates[M]
-                col_norms = T.sqrt(T.sum(T.sqr(updated_M), axis=0))
-                desired_norms = T.clip(col_norms, 0, self.M_max_col_norm)
-                updates[M] = updated_M * (desired_norms / (1e-7 + col_norms))
-
-        if self.C_max_row_norm is not None:
-            raise NotImplementedError('Row max norm not implemented for C')
-        if self.C_max_col_norm is not None:
-            assert self.C_max_row_norm is None
-            C = self.C
-            if C in updates:
-                updated_C = updates[C]
-                col_norms = T.sqrt(T.sum(T.sqr(updated_C), axis=0))
-                desired_norms = T.clip(col_norms, 0, self.C_max_col_norm)
-                updates[C] = updated_C * (desired_norms / (1e-7 + col_norms))
-
 
 class Linear(Layer):
     """
@@ -2068,6 +1641,7 @@ class Tanh(Linear):
     def cost(self, *args, **kwargs):
         raise NotImplementedError()
 
+
 class Sigmoid(Linear):
     """
     A layer that performs an affine transformation of its (vectorial)
@@ -2097,7 +1671,7 @@ class Sigmoid(Linear):
                                 the argmax is as a classifier
         """
         super(Sigmoid, self).__init__(**kwargs)
-        assert monitor_style in ['classification', 'detection']
+        assert monitor_style in ['classification', 'detection', 'argmax_classification']
         self.monitor_style = monitor_style
 
     def fprop(self, state_below):
@@ -2215,13 +1789,20 @@ class Sigmoid(Linear):
             if self.monitor_style == 'detection':
                 rval.update(self.get_detection_channels_from_state(state, target))
             else:
-                assert self.monitor_style == 'classification'
-                # Threshold Y_hat at 0.5.
-                prediction = T.gt(state, 0.5)
-                # If even one feature is wrong for a given training example,
-                # it's considered incorrect, so we max over columns.
-                incorrect = T.neq(target, prediction).max(axis=1)
-                rval['misclass'] = T.cast(incorrect, config.floatX).mean()
+                assert self.monitor_style in ['classification', 'argmax_classification']
+                if self.monitor_style == 'classification':
+                    # Threshold Y_hat at 0.5.
+                    prediction = T.gt(state, 0.5)
+                    # If even one feature is wrong for a given training example,
+                    # it's considered incorrect, so we max over columns.
+                    incorrect = T.neq(target, prediction).max(axis=1)
+                    rval['misclass'] = T.cast(incorrect, config.floatX).mean()
+                else:
+                    y = T.argmax(target, axis=1)
+                    y_hat = T.argmax(state, axis=1)
+                    misclass = T.neq(y, y_hat).mean()
+                    rval['misclass'] = T.cast(misclass, config.floatX)
+
         return rval
 
 class RectifiedLinear(Linear):
@@ -2536,7 +2117,7 @@ class ConvRectifiedLinear(Layer):
 
         return p
 
-class Conv1DSigmoid(Layer):
+class ConvSigmoid(Layer):
     """
         WRITEME
     """
@@ -2675,51 +2256,26 @@ class Conv1DSigmoid(Layer):
         #log.info('Detector space: ', self.detector_space.shape)
         
         assert self.pool_type in ['max', 'mean']
-        
-        #use stride=1 in convolution so the code is fast and then subsample
-        if self.kernel_subsample!=self.kernel_stride:
-            
-            output_shape_subsampled = [output_shape[0]/self.kernel_subsample[0], output_shape[1]/self.kernel_subsample[1]+1]
-            
-            self.detector_space_subsampled = Conv2DSpace(shape=output_shape_subsampled,
-                num_channels = self.output_channels, axes = ('b', 'c', 0, 1))
-            
-            #print 'Detector subsampled space: ', self.detector_space_subsampled.shape
-            
-            dummy_batch_size = self.mlp.batch_size
-            if dummy_batch_size is None:
-                dummy_batch_size = 2
-            dummy_detector = sharedX(self.detector_space_subsampled.get_origin_batch(dummy_batch_size))
-            if self.pool_type == 'max':
-                dummy_p = max_pool(bc01=dummy_detector, pool_shape=self.pool_shape,
-                        pool_stride=self.pool_stride,
-                        image_shape=self.detector_space_subsampled.shape)
-            elif self.pool_type == 'mean':
-                dummy_p = mean_pool(bc01=dummy_detector, pool_shape=self.pool_shape,
-                        pool_stride=self.pool_stride,
-                        image_shape=self.detector_space_subsampled.shape)
-            dummy_p = dummy_p.eval()
 
-        else:
+        dummy_batch_size = self.mlp.batch_size
+        if dummy_batch_size is None:
+            dummy_batch_size = 2
+        dummy_detector = sharedX(self.detector_space.get_origin_batch(dummy_batch_size))
+        if self.pool_type == 'max':
+            dummy_p = max_pool(bc01=dummy_detector, pool_shape=self.pool_shape,
+                    pool_stride=self.pool_stride,
+                    image_shape=self.detector_space.shape)
+        elif self.pool_type == 'mean':
+            dummy_p = mean_pool(bc01=dummy_detector, pool_shape=self.pool_shape,
+                    pool_stride=self.pool_stride,
+                    image_shape=self.detector_space.shape)
+        dummy_p = dummy_p.eval()
 
-            dummy_batch_size = self.mlp.batch_size
-            if dummy_batch_size is None:
-                dummy_batch_size = 2
-            dummy_detector = sharedX(self.detector_space.get_origin_batch(dummy_batch_size))
-            if self.pool_type == 'max':
-                dummy_p = max_pool(bc01=dummy_detector, pool_shape=self.pool_shape,
-                        pool_stride=self.pool_stride,
-                        image_shape=self.detector_space.shape)
-            elif self.pool_type == 'mean':
-                dummy_p = mean_pool(bc01=dummy_detector, pool_shape=self.pool_shape,
-                        pool_stride=self.pool_stride,
-                        image_shape=self.detector_space.shape)
-            dummy_p = dummy_p.eval()
-    
         self.output_space = Conv2DSpace(shape=[dummy_p.shape[2], dummy_p.shape[3]],
                 num_channels = self.output_channels, axes = ('b', 'c', 0, 1) )
 
         print 'Output space: ', self.output_space.shape
+
 
     def censor_updates(self, updates):
 
@@ -2801,12 +2357,7 @@ class Conv1DSigmoid(Layer):
             z.name = self.layer_name + '_z'
 
         self.detector_space.validate(z)
-        
-        if self.kernel_subsample!=self.kernel_stride:
-            last_elem = z.shape[3]
-            z = z[:, :, :, 0:last_elem:self.kernel_subsample[1]]
-            self.detector_space_subsampled.validate(z)
-        
+
         d = T.nnet.sigmoid(z)
             
         if not hasattr(self, 'detector_normalization'):
@@ -2819,11 +2370,11 @@ class Conv1DSigmoid(Layer):
         if self.pool_type == 'max':
             p = max_pool(bc01=d, pool_shape=self.pool_shape,
                     pool_stride=self.pool_stride,
-                    image_shape=self.detector_space_subsampled.shape)
+                    image_shape=self.detector_space.shape)
         elif self.pool_type == 'mean':
             p = mean_pool(bc01=d, pool_shape=self.pool_shape,
                     pool_stride=self.pool_stride,
-                    image_shape=self.detector_space_subsampled.shape)
+                    image_shape=self.detector_space.shape)
 
         self.output_space.validate(p)
 
@@ -3102,7 +2653,6 @@ class Conv1DSigmoidStrided(Layer):
         W ,= self.transformer.get_params()
 
         assert W.ndim == 4
-
         sq_W = T.sqr(W)
 
         row_norms = T.sqrt(sq_W.sum(axis=(1,2,3)))
@@ -3893,6 +3443,152 @@ class MaxoutConv1DStrided(Layer):
     #    self.transformer.set_batch_size(batch_size)
 
 
+def pool_dnn(bc01, pool_shape, pool_stride, mode='max'):
+    """
+    cuDNN pooling op.
+    Parameters
+    ----------
+    bc01 : theano tensor
+        Minibatch in format (batch size, channels, rows, cols).
+    pool_shape : tuple
+        Shape of the pool region (rows, cols).
+    pool_stride : tuple
+        Strides between pooling regions (row stride, col stride).
+    mode : str
+        Flag for `mean` or `max` pooling.
+    Returns
+    -------
+    mx : theano tensor
+        The output of pooling applied to `bc01`.
+    """
+    assert mode in ['max', 'mean']
+    if mode == 'mean':
+        raise NotImplementedError('Mean pooling is not implemented '
+                                  'in Pylearn2 using cuDNN as of '
+                                  'January 19th, 2015.')
+
+    mx = dnn_pool(bc01, tuple(pool_shape), tuple(pool_stride), mode)
+    return mx
+
+
+def max_pool(bc01, pool_shape, pool_stride, image_shape, try_dnn=True):
+    """
+    Theano's max pooling op only supports pool_stride = pool_shape
+    so here we have a graph that does max pooling with strides
+    Parameters
+    ----------
+    bc01 : theano tensor
+        minibatch in format (batch size, channels, rows, cols)
+    pool_shape : tuple
+        shape of the pool region (rows, cols)
+    pool_stride : tuple
+        strides between pooling regions (row stride, col stride)
+    image_shape : tuple
+        avoid doing some of the arithmetic in theano
+    try_dnn : bool
+        Flag to set cuDNN use (default: True).
+    Returns
+    -------
+    pooled : theano tensor
+        The output of pooling applied to `bc01`
+    See Also
+    --------
+    max_pool_c01b : Same functionality but with ('c', 0, 1, 'b') axes
+    sandbox.cuda_convnet.pool.max_pool_c01b : Same functionality as
+        `max_pool_c01b` but GPU-only and considerably faster.
+    mean_pool : Mean pooling instead of max pooling
+    """
+    mx = None
+    r, c = image_shape
+    pr, pc = pool_shape
+    rs, cs = pool_stride
+
+    assert pr <= r
+    assert pc <= c
+
+    name = bc01.name
+    if name is None:
+        name = 'anon_bc01'
+
+    if try_dnn and bc01.dtype == "float32":
+        use_dnn = dnn_available()
+    else:
+        use_dnn = False
+
+    if pool_shape == pool_stride and not use_dnn:
+        mx = max_pool_2d(bc01, pool_shape, False)
+        mx.name = 'max_pool(' + name + ')'
+        return mx
+
+    # Compute index in pooled space of last needed pool
+    # (needed = each input pixel must appear in at least one pool)
+    def last_pool(im_shp, p_shp, p_strd):
+        rval = int(np.ceil(float(im_shp - p_shp) / p_strd))
+        assert p_strd * rval + p_shp >= im_shp
+        assert p_strd * (rval - 1) + p_shp < im_shp
+        # Catch case where p_strd > p_shp causes pool
+        # to be set outside of im_shp.
+        if p_strd * rval >= im_shp:
+            rval -= 1
+        return rval
+    # Compute starting row of the last pool
+    last_pool_r = last_pool(image_shape[0],
+                            pool_shape[0],
+                            pool_stride[0]) * pool_stride[0]
+    # Compute number of rows needed in image for all indexes to work out
+    required_r = last_pool_r + pr
+
+    last_pool_c = last_pool(image_shape[1],
+                            pool_shape[1],
+                            pool_stride[1]) * pool_stride[1]
+    required_c = last_pool_c + pc
+
+    for bc01v in get_debug_values(bc01):
+        assert not contains_inf(bc01v)
+        assert bc01v.shape[2] == image_shape[0]
+        assert bc01v.shape[3] == image_shape[1]
+
+    if (required_r > r) or (required_c > c):
+        small_r = min(required_r, r)
+        small_c = min(required_c, c)
+        assert bc01.dtype.startswith('float')
+        wide_infinity = T.alloc(T.constant(-np.inf, dtype=bc01.dtype),
+                                bc01.shape[0],
+                                bc01.shape[1],
+                                required_r,
+                                required_c)
+
+        bc01 = T.set_subtensor(wide_infinity[:, :, 0:small_r, 0:small_c],
+                               bc01[:, :, 0:small_r, 0:small_c])
+        name = 'infinite_padded_' + name
+
+    if use_dnn:
+        mx = pool_dnn(bc01, pool_shape, pool_stride, 'max')
+    else:
+        for row_within_pool in xrange(pool_shape[0]):
+            row_stop = last_pool_r + row_within_pool + 1
+            for col_within_pool in xrange(pool_shape[1]):
+                col_stop = last_pool_c + col_within_pool + 1
+                cur = bc01[:,
+                           :,
+                           row_within_pool:row_stop:rs,
+                           col_within_pool:col_stop:cs]
+                cur.name = ('max_pool_cur_' + name + '_' +
+                            str(row_within_pool) + '_' + str(col_within_pool))
+                if mx is None:
+                    mx = cur
+                else:
+                    mx = T.maximum(mx, cur)
+                    mx.name = ('max_pool_mx_' + name + '_' +
+                               str(row_within_pool) + '_' +
+                               str(col_within_pool))
+
+    mx.name = 'max_pool(' + name + ')'
+
+    for mxv in get_debug_values(mx):
+        assert isfinite(mxv)
+
+    return mx
 
 def max_pool_channels_1D(bc01, num_inp_channels, num_out_channels):
     pp = None
@@ -3904,72 +3600,72 @@ def max_pool_channels_1D(bc01, num_inp_channels, num_out_channels):
             pp = T.maximum(pp,t)
     return pp
 
-def max_pool(bc01, pool_shape, pool_stride, image_shape):
-    """
-    Theano's max pooling op only support pool_stride = pool_shape
-    so here we have a graph that does max pooling with strides
-
-    bc01: minibatch in format (batch size, channels, rows, cols)
-    pool_shape: shape of the pool region (rows, cols)
-    pool_stride: strides between pooling regions (row stride, col stride)
-    image_shape: avoid doing some of the arithmetic in theano
-    """
-    mx = None
-    r, c = image_shape
-    pr, pc = pool_shape
-    rs, cs = pool_stride
-
-    assert pr <= r
-    assert pc <= c
-
-    # Compute index in pooled space of last needed pool
-    # (needed = each input pixel must appear in at least one pool)
-    def last_pool(im_shp, p_shp, p_strd):
-        rval = int(np.ceil(float(im_shp - p_shp) / p_strd))
-        assert p_strd * rval + p_shp >= im_shp
-        assert p_strd * (rval - 1) + p_shp < im_shp
-        return rval
-    # Compute starting row of the last pool
-    last_pool_r = last_pool(image_shape[0] ,pool_shape[0], pool_stride[0]) * pool_stride[0]
-    # Compute number of rows needed in image for all indexes to work out
-    required_r = last_pool_r + pr
-
-    last_pool_c = last_pool(image_shape[1] ,pool_shape[1], pool_stride[1]) * pool_stride[1]
-    required_c = last_pool_c + pc
-
-    for bc01v in get_debug_values(bc01):
-        assert not np.any(np.isinf(bc01v))
-        assert bc01v.shape[2] == image_shape[0]
-        assert bc01v.shape[3] == image_shape[1]
-
-    wide_infinity = T.alloc(T.constant(-np.inf, dtype=config.floatX),
-            bc01.shape[0], bc01.shape[1], required_r, required_c)
-
-    name = bc01.name
-    if name is None:
-        name = 'anon_bc01'
-    bc01 = T.set_subtensor(wide_infinity[:,:, 0:r, 0:c], bc01)
-    bc01.name = 'infinite_padded_' + name
-
-    for row_within_pool in xrange(pool_shape[0]):
-        row_stop = last_pool_r + row_within_pool + 1
-        for col_within_pool in xrange(pool_shape[1]):
-            col_stop = last_pool_c + col_within_pool + 1
-            cur = bc01[:,:,row_within_pool:row_stop:rs, col_within_pool:col_stop:cs]
-            cur.name = 'max_pool_cur_'+bc01.name+'_'+str(row_within_pool)+'_'+str(col_within_pool)
-            if mx is None:
-                mx = cur
-            else:
-                mx = T.maximum(mx, cur)
-                mx.name = 'max_pool_mx_'+bc01.name+'_'+str(row_within_pool)+'_'+str(col_within_pool)
-
-    mx.name = 'max_pool('+name+')'
-
-    for mxv in get_debug_values(mx):
-        assert not np.any(np.isnan(mxv))
-        assert not np.any(np.isinf(mxv))
-
-    return mx
+# def max_pool(bc01, pool_shape, pool_stride, image_shape):
+#     """
+#     Theano's max pooling op only support pool_stride = pool_shape
+#     so here we have a graph that does max pooling with strides
+#
+#     bc01: minibatch in format (batch size, channels, rows, cols)
+#     pool_shape: shape of the pool region (rows, cols)
+#     pool_stride: strides between pooling regions (row stride, col stride)
+#     image_shape: avoid doing some of the arithmetic in theano
+#     """
+#     mx = None
+#     r, c = image_shape
+#     pr, pc = pool_shape
+#     rs, cs = pool_stride
+#
+#     assert pr <= r
+#     assert pc <= c
+#
+#     # Compute index in pooled space of last needed pool
+#     # (needed = each input pixel must appear in at least one pool)
+#     def last_pool(im_shp, p_shp, p_strd):
+#         rval = int(np.ceil(float(im_shp - p_shp) / p_strd))
+#         assert p_strd * rval + p_shp >= im_shp
+#         assert p_strd * (rval - 1) + p_shp < im_shp
+#         return rval
+#     # Compute starting row of the last pool
+#     last_pool_r = last_pool(image_shape[0] ,pool_shape[0], pool_stride[0]) * pool_stride[0]
+#     # Compute number of rows needed in image for all indexes to work out
+#     required_r = last_pool_r + pr
+#
+#     last_pool_c = last_pool(image_shape[1] ,pool_shape[1], pool_stride[1]) * pool_stride[1]
+#     required_c = last_pool_c + pc
+#
+#     for bc01v in get_debug_values(bc01):
+#         assert not np.any(np.isinf(bc01v))
+#         assert bc01v.shape[2] == image_shape[0]
+#         assert bc01v.shape[3] == image_shape[1]
+#
+#     wide_infinity = T.alloc(T.constant(-np.inf, dtype=config.floatX),
+#             bc01.shape[0], bc01.shape[1], required_r, required_c)
+#
+#     name = bc01.name
+#     if name is None:
+#         name = 'anon_bc01'
+#     bc01 = T.set_subtensor(wide_infinity[:,:, 0:r, 0:c], bc01)
+#     bc01.name = 'infinite_padded_' + name
+#
+#     for row_within_pool in xrange(pool_shape[0]):
+#         row_stop = last_pool_r + row_within_pool + 1
+#         for col_within_pool in xrange(pool_shape[1]):
+#             col_stop = last_pool_c + col_within_pool + 1
+#             cur = bc01[:,:,row_within_pool:row_stop:rs, col_within_pool:col_stop:cs]
+#             cur.name = 'max_pool_cur_'+bc01.name+'_'+str(row_within_pool)+'_'+str(col_within_pool)
+#             if mx is None:
+#                 mx = cur
+#             else:
+#                 mx = T.maximum(mx, cur)
+#                 mx.name = 'max_pool_mx_'+bc01.name+'_'+str(row_within_pool)+'_'+str(col_within_pool)
+#
+#     mx.name = 'max_pool('+name+')'
+#
+#     for mxv in get_debug_values(mx):
+#         assert not np.any(np.isnan(mxv))
+#         assert not np.any(np.isinf(mxv))
+#
+#     return mx
 
 def max_pool_c01b(c01b, pool_shape, pool_stride, image_shape):
     """
@@ -4562,3 +4258,807 @@ def geometric_mean_prediction(forward_props):
         presoftmax.append(out.owner.inputs[0])
     average = reduce(lambda x, y: x + y, presoftmax) / float(len(presoftmax))
     return T.nnet.softmax(average)
+
+
+class CICDSoftmax(Layer):
+    """
+    A context-dependent-independent softmax layer
+    """
+    def __init__(self,
+                 layer_name,
+                 cd_n_classes,
+                 ci_n_classes,
+                 prediction_mode=False,
+                 ci_to_cd_nonlinearity=None,
+                 zero_M_grad_for_cd=False,
+                 learn_C = True,
+                 ci_cost_scaler=0.3,
+                 costs_as_tuple=False,
+                 low_rank=None,
+                 irange=None,
+                 irange_C=None,
+                 istdev=None,
+                 sparse_init=None,
+                 W_lr_scale=None,
+                 C_lr_scale=None,
+                 M_lr_scale=None,
+                 b_lr_scale=None,
+                 m_lr_scale=None,
+                 max_row_norm=None,
+                 max_col_norm=None,
+                 M_max_row_norm=None,
+                 M_max_col_norm=None,
+                 C_max_row_norm=None,
+                 C_max_col_norm=None):
+        """
+        """
+
+        if isinstance(W_lr_scale, str):
+            W_lr_scale = float(W_lr_scale)
+
+        if isinstance(C_lr_scale, str):
+            assert learn_C is True, (
+                "learn_C must be True to be able to use C_lr_scale parameter"
+            )
+            C_lr_scale = float(C_lr_scale)
+
+        if isinstance(M_lr_scale, str):
+            M_lr_scale = float(M_lr_scale)
+
+        if isinstance(b_lr_scale, str):
+            b_lr_scale = float(b_lr_scale)
+
+        if isinstance(m_lr_scale, str):
+            m_lr_scale = float(m_lr_scale)
+
+        assert ci_to_cd_nonlinearity in ['softmax', 'sigmoid', 'relu', 'tanh', 'lin', 'None', None]
+
+        if ci_to_cd_nonlinearity == 'None' or ci_to_cd_nonlinearity is None:
+            ci_to_cd_nonlinearity = 'lin'
+
+        self.__dict__.update(locals())
+        del self.self
+
+        assert isinstance(cd_n_classes, py_integer_types)
+        assert isinstance(ci_n_classes, py_integer_types)
+
+        if self.prediction_mode:
+            self.output_space = VectorSpace(cd_n_classes)
+        else:
+            self.output_space = CompositeSpace((VectorSpace(cd_n_classes),
+                                                VectorSpace(ci_n_classes)))
+
+    def get_target_source(self):
+        if self.prediction_mode:
+            return 'targets'
+        else:
+            return 'targets_cd', 'targets_ci'
+
+    def get_output_space(self):
+        return self.output_space
+
+    def get_lr_scalers(self):
+
+        rval = OrderedDict()
+
+        if self.W_lr_scale is not None:
+            assert isinstance(self.W_lr_scale, float)
+            rval[self.W] = self.W_lr_scale
+
+        if self.M_lr_scale is not None:
+            assert isinstance(self.M_lr_scale, float)
+            rval[self.M] = self.M_lr_scale
+
+        if self.C_lr_scale is not None:
+            assert isinstance(self.C_lr_scale, float)
+            rval[self.C] = self.C_lr_scale
+
+        if not hasattr(self, 'b_lr_scale'):
+            self.b_lr_scale = None
+
+        if self.b_lr_scale is not None:
+            assert isinstance(self.b_lr_scale, float)
+            rval[self.b] = self.b_lr_scale
+
+        if not hasattr(self, 'm_lr_scale'):
+            self.m_lr_scale = None
+
+        if self.m_lr_scale is not None:
+            assert isinstance(self.m_lr_scale, float)
+            rval[self.m] = self.m_lr_scale
+
+        return rval
+
+    def get_monitoring_channels(self):
+
+        W = self.W
+        assert W.ndim == 2
+        sq_W = T.sqr(W)
+        row_norms = T.sqrt(sq_W.sum(axis=1))
+        col_norms = T.sqrt(sq_W.sum(axis=0))
+
+        M = self.M
+        assert M.ndim == 2
+        sq_M = T.sqr(M)
+        M_row_norms = T.sqrt(sq_M.sum(axis=1))
+        M_col_norms = T.sqrt(sq_M.sum(axis=0))
+
+        C = self.C
+        assert C.ndim == 2
+        sq_C = T.sqr(C)
+        C_row_norms = T.sqrt(sq_C.sum(axis=1))
+        C_col_norms = T.sqrt(sq_C.sum(axis=0))
+
+        return OrderedDict([
+                            ('row_norms_min'  , row_norms.min()),
+                            ('row_norms_mean' , row_norms.mean()),
+                            ('row_norms_max'  , row_norms.max()),
+                            ('col_norms_min'  , col_norms.min()),
+                            ('col_norms_mean' , col_norms.mean()),
+                            ('col_norms_max'  , col_norms.max()),
+                            ('M_row_norms_min'  , M_row_norms.min()),
+                            ('M_row_norms_mean' , M_row_norms.mean()),
+                            ('M_row_norms_max'  , M_row_norms.max()),
+                            ('M_col_norms_min'  , M_col_norms.min()),
+                            ('M_col_norms_mean' , M_col_norms.mean()),
+                            ('M_col_norms_max'  , M_col_norms.max()),
+                            ('C_row_norms_min'  , C_row_norms.min()),
+                            ('C_row_norms_mean' , C_row_norms.mean()),
+                            ('C_row_norms_max'  , C_row_norms.max()),
+                            ('C_col_norms_min'  , C_col_norms.min()),
+                            ('C_col_norms_mean' , C_col_norms.mean()),
+                            ('C_col_norms_max'  , C_col_norms.max()),
+                            ])
+
+    def get_monitoring_channels_from_state(self, state, target=None):
+
+        rval = OrderedDict()
+
+        if isinstance(state, (list, tuple)):
+
+            assert len(state) == 2
+
+            state_cd = state[0]
+            state_ci = state[1]
+
+            mx_cd = state_cd.max(axis=1)
+            mx_ci = state_ci.max(axis=1)
+
+            rval =  OrderedDict([
+                ('cd_mean_max_class' , mx_cd.mean()),
+                ('cd_max_max_class' , mx_cd.max()),
+                ('cd_min_max_class' , mx_cd.min()),
+                ('ci_mean_max_class' , mx_ci.mean()),
+                ('ci_max_max_class' , mx_ci.max()),
+                ('ci_min_max_class' , mx_ci.min())
+            ])
+
+            if target is not None:
+
+                target_cd, target_ci = target
+
+                y_hat_cd = T.argmax(state_cd, axis=1)
+                y_cd = T.argmax(target_cd, axis=1)
+                misclass = T.neq(y_cd, y_hat_cd).mean()
+                misclass = T.cast(misclass, config.floatX)
+                rval['misclass'] = misclass
+                rval['nll'] = self._cost_partial(Y_hat=state_cd, Y=target_cd)
+
+                y_hat_ci = T.argmax(state_ci, axis=1)
+                y_ci = T.argmax(target_ci, axis=1)
+                misclass = T.neq(y_ci, y_hat_ci).mean()
+                misclass = T.cast(misclass, config.floatX)
+                rval['misclass_ci'] = misclass
+                rval['nll_ci'] = self._cost_partial(Y_hat=state_ci, Y=target_ci)
+        else:
+
+            mx_cd = state.max(axis=1)
+
+            rval =  OrderedDict([
+                ('cd_mean_max_class' , mx_cd.mean()),
+                ('cd_max_max_class' , mx_cd.max()),
+                ('cd_min_max_class' , mx_cd.min()),
+            ])
+
+            if target is not None:
+
+                y_hat_cd = T.argmax(state, axis=1)
+                y_cd = T.argmax(target, axis=1)
+                misclass = T.neq(y_cd, y_hat_cd).mean()
+                misclass = T.cast(misclass, config.floatX)
+                rval['misclass'] = misclass
+                rval['nll'] = self._cost_partial(Y_hat=state, Y=target)
+
+        return rval
+
+    def set_input_space(self, space):
+        self.input_space = space
+
+        if not isinstance(space, Space):
+            raise TypeError("Expected Space, got "+
+                    str(space)+" of type "+str(type(space)))
+
+        self.input_dim = space.get_total_dimension()
+        self.needs_reformat = not isinstance(space, VectorSpace)
+
+        self.desired_space = VectorSpace(self.input_dim)
+
+        if not self.needs_reformat:
+            assert self.desired_space == self.input_space
+
+        rng = self.mlp.rng
+
+        if self.irange is not None:
+            assert self.istdev is None
+            assert self.sparse_init is None
+            W = rng.uniform(-self.irange,self.irange, (self.input_dim, self.cd_n_classes))
+            M = rng.uniform(-self.irange,self.irange, (self.input_dim, self.ci_n_classes))
+            if self.irange_C is not None:
+                C = rng.uniform(-self.irange_C,self.irange_C, (self.ci_n_classes, self.cd_n_classes))
+            else:
+                C = np.zeros((self.ci_n_classes, self.cd_n_classes))
+        elif self.istdev is not None:
+            assert self.sparse_init is None
+            W = rng.randn(self.input_dim, self.n_classes) * self.istdev
+        else:
+            assert self.sparse_init is not None
+            W = np.zeros((self.input_dim, self.n_classes))
+            for i in xrange(self.n_classes):
+                for j in xrange(self.sparse_init):
+                    idx = rng.randint(0, self.input_dim)
+                    while W[idx, i] != 0.:
+                        idx = rng.randint(0, self.input_dim)
+                    W[idx, i] = rng.randn()
+
+        self.W = sharedX(W,  'softmax_W' )
+        self.C = sharedX(C,  'softmax_C' )
+        self.M = sharedX(M,  'softmax_M' )
+
+        self.b = sharedX(np.zeros((self.cd_n_classes,)), "softmax_b")
+        self.m = sharedX(np.zeros((self.ci_n_classes,)), "softmax_m")
+
+        self._params = [ self.b, self.m, self.W, self.M]
+        if self.learn_C:
+            self._params.append(self.C)
+
+    def get_weights_topo(self):
+        if not isinstance(self.input_space, Conv2DSpace):
+            raise NotImplementedError()
+        desired = self.W.get_value().T
+        ipt = self.desired_space.format_as(desired, self.input_space)
+        rval = Conv2DSpace.convert_numpy(ipt, self.input_space.axes, ('b', 0, 1, 'c'))
+        return rval
+
+    def get_weights(self):
+        raise NotImplementedError()
+
+    def set_weights(self, weights):
+        raise NotImplementedError()
+
+    def set_biases(self, biases):
+        raise NotImplementedError()
+
+    def get_biases(self):
+        raise NotImplementedError()
+
+    def get_weights_format(self):
+        return ('v', 'h')
+
+    def fprop(self, state_below):
+
+        self.input_space.validate(state_below)
+
+        if self.needs_reformat:
+            state_below = self.input_space.format_as(state_below, self.desired_space)
+
+        self.desired_space.validate(state_below)
+        assert state_below.ndim == 2
+
+        assert self.W.ndim == 2
+        assert self.M.ndim == 2
+        assert self.C.ndim == 2
+        assert hasattr(self, 'ci_to_cd_nonlinearity')
+        assert hasattr(self, 'zero_M_grad_for_cd')
+        assert hasattr(self, 'prediction_mode')
+
+        b = self.b
+        m = self.m
+
+        if self.zero_M_grad_for_cd:
+            M = T.dot(state_below, consider_constant(self.M)) + consider_constant(m)
+        else:
+            M = T.dot(state_below, self.M) + m
+
+        if self.ci_to_cd_nonlinearity == 'softmax':
+            MO = T.nnet.softmax(M)
+        elif self.ci_to_cd_nonlinearity == 'sigmoid':
+            MO = T.nnet.sigmoid(M)
+        elif self.ci_to_cd_nonlinearity == 'relu':
+            MO = T.maximum(0, M)
+        elif self.ci_to_cd_nonlinearity == 'tanh':
+            MO = T.tanh(M)
+        else:
+            MO = M
+
+        if self.learn_C:
+            Z = T.dot(state_below, self.W) + T.dot(MO, self.C) + b
+        else:
+            Z = T.dot(state_below, self.W) + b
+
+        rval_cd = T.nnet.softmax(Z)
+        if self.prediction_mode is True:
+            return rval_cd
+        else:
+            if self.ci_to_cd_nonlinearity == 'softmax':
+                rval_m = MO
+            else:
+                rval_m = T.nnet.softmax(M)
+            return rval_cd, rval_m
+
+    def cost(self, Y, Y_hat):
+        """
+        Y must be one-hot binary. Y_hat is a softmax estimate.
+        of Y. Returns negative log probability of Y under the Y_hat
+        distribution.
+        """
+
+        if self.prediction_mode:
+            #this is for testing purposes, training
+            #in pred mode simplifies this to single task
+            #mutli-class prediction
+            rval = self._cost_partial(Y, Y_hat)
+        else:
+
+            Y_cd, Y_ci = Y
+            Y_hat_cd, Y_hat_ci = Y_hat
+
+            rval_cd = self._cost_partial(Y_cd, Y_hat_cd)
+            rval_ci = self._cost_partial(Y_ci, Y_hat_ci)
+
+            if self.costs_as_tuple:
+                rval = (rval_cd, rval_ci)
+            else:
+                rval = (1-self.ci_cost_scaler)*rval_cd \
+                       + self.ci_cost_scaler*rval_ci
+
+        return rval
+
+    def _cost_partial(self, Y, Y_hat):
+
+        assert hasattr(Y_hat, 'owner')
+
+        #get inputs for cd task
+        owner = Y_hat.owner
+        assert owner is not None
+        op = owner.op
+        if isinstance(op, Print):
+            assert len(owner.inputs) == 1
+            Y_hat, = owner.inputs
+            owner = Y_hat.owner
+            op = owner.op
+        assert isinstance(op, T.nnet.Softmax)
+        z ,= owner.inputs
+        assert z.ndim == 2
+
+        z = z - z.max(axis=1).dimshuffle(0, 'x')
+        log_prob = z - T.log(T.exp(z).sum(axis=1).dimshuffle(0, 'x'))
+        # we use sum and not mean because this is really one variable per row
+        log_prob_of = (Y * log_prob).sum(axis=1)
+        assert log_prob_of.ndim == 1
+
+        rval = log_prob_of.mean()
+
+        return -rval
+
+    #def cost_from_X(self, data):
+    #    """
+    #    Computes self.cost, but takes data=(X, Y) rather than Y_hat as an argument.
+    #    This is just a wrapper around self.cost that computes Y_hat by
+    #    calling Y_hat = self.fprop(X)
+    #    """
+    #    self.cost_from_X_data_specs()[0].validate(data)
+    #    X, Y = data
+    #    Y_hat = self.fprop(X)
+    #    return self.cost(Y, Y_hat)
+
+
+    def get_weight_decay(self, coeff):
+        if isinstance(coeff, str):
+            coeff = float(coeff)
+        assert isinstance(coeff, float) or hasattr(coeff, 'dtype')
+        return coeff * T.sqr(self.W).sum()
+
+    def get_l1_weight_decay(self, coeff):
+        if isinstance(coeff, str):
+            coeff = float(coeff)
+        assert isinstance(coeff, float) or hasattr(coeff, 'dtype')
+        W = self.W
+        return coeff * abs(W).sum()
+
+    def censor_updates(self, updates):
+        if self.max_row_norm is not None:
+            W = self.W
+            if W in updates:
+                updated_W = updates[W]
+                row_norms = T.sqrt(T.sum(T.sqr(updated_W), axis=1))
+                desired_norms = T.clip(row_norms, 0, self.max_row_norm)
+                updates[W] = updated_W * (desired_norms / (1e-7 + row_norms)).dimshuffle(0, 'x')
+        if self.max_col_norm is not None:
+            assert self.max_row_norm is None
+            W = self.W
+            if W in updates:
+                updated_W = updates[W]
+                col_norms = T.sqrt(T.sum(T.sqr(updated_W), axis=0))
+                desired_norms = T.clip(col_norms, 0, self.max_col_norm)
+                updates[W] = updated_W * (desired_norms / (1e-7 + col_norms))
+
+        if self.M_max_row_norm is not None:
+            raise NotImplementedError('Row max norm not implemented for M')
+        if self.M_max_col_norm is not None:
+            assert self.M_max_row_norm is None
+            M = self.M
+            if M in updates:
+                updated_M = updates[M]
+                col_norms = T.sqrt(T.sum(T.sqr(updated_M), axis=0))
+                desired_norms = T.clip(col_norms, 0, self.M_max_col_norm)
+                updates[M] = updated_M * (desired_norms / (1e-7 + col_norms))
+
+        if self.C_max_row_norm is not None:
+            raise NotImplementedError('Row max norm not implemented for C')
+        if self.C_max_col_norm is not None:
+            assert self.C_max_row_norm is None
+            C = self.C
+            if C in updates:
+                updated_C = updates[C]
+                col_norms = T.sqrt(T.sum(T.sqr(updated_C), axis=0))
+                desired_norms = T.clip(col_norms, 0, self.C_max_col_norm)
+                updates[C] = updated_C * (desired_norms / (1e-7 + col_norms))
+
+
+import subprocess
+
+class SequenceSoftmax(Layer):
+
+    def __init__(self, n_classes,
+                 layer_name,
+                 kaldi_model,
+                 kaldi_denlats,
+                 kaldi_aligns,
+                 kaldi_priors,
+                 irange = None,
+                 istdev = None,
+                 sparse_init = None, W_lr_scale = None,
+                 b_lr_scale = None, max_row_norm = None,
+                 no_affine = False,
+                 max_col_norm = None,
+                 init_bias_target_marginals= None,
+                 skip_softmax=True):
+        """
+        """
+
+        if isinstance(W_lr_scale, str):
+            W_lr_scale = float(W_lr_scale)
+
+        self.__dict__.update(locals())
+        del self.self
+        del self.init_bias_target_marginals
+
+        assert isinstance(n_classes, py_integer_types)
+
+        self.output_space = VectorSpace(n_classes)
+        if not no_affine:
+            self.b = sharedX( np.zeros((n_classes,)), name = 'softmax_b')
+            if init_bias_target_marginals:
+                marginals = init_bias_target_marginals.y.mean(axis=0)
+                assert marginals.ndim == 1
+                b = pseudoinverse_softmax_numpy(marginals).astype(self.b.dtype)
+                assert b.ndim == 1
+                assert b.dtype == self.b.dtype
+                self.b.set_value(b)
+        else:
+            assert init_bias_target_marginals is None
+
+        #class subprocess.Popen(args, bufsize=0, executable=None, stdin=None, stdout=None, stderr=None, preexec_fn=None,
+        # close_fds=False, shell=False, cwd=None, env=None, universal_newlines=False, startupinfo=None, creationflags=0)
+
+        self.lat_call=["lattice-to-smbr-post-to-mat",
+                  "--do-smbr=true",
+                  "--silence-phones=\"1:2:3:4:5:6:7:8:9:10\"",
+                  self.kaldi_model,
+                  "ark:-",
+                  self.kaldi_denlats,
+                  self.kaldi_aligns,
+                  "ark:-"]
+
+        self.pipe = subprocess.Popen(self.lat_call, bufsize=-1,
+                                     stdin=subprocess.PIPE,
+                                     stdout=subprocess.PIPE,
+                                     stderr=subprocess.PIPE)
+
+    def get_lr_scalers(self):
+
+        rval = OrderedDict()
+
+        if self.W_lr_scale is not None:
+            assert isinstance(self.W_lr_scale, float)
+            rval[self.W] = self.W_lr_scale
+
+        if not hasattr(self, 'b_lr_scale'):
+            self.b_lr_scale = None
+
+        if self.b_lr_scale is not None:
+            assert isinstance(self.b_lr_scale, float)
+            rval[self.b] = self.b_lr_scale
+
+        return rval
+
+    def get_monitoring_channels(self):
+
+        if self.no_affine:
+            return OrderedDict()
+
+        W = self.W
+
+        assert W.ndim == 2
+
+        sq_W = T.sqr(W)
+
+        row_norms = T.sqrt(sq_W.sum(axis=1))
+        col_norms = T.sqrt(sq_W.sum(axis=0))
+
+        return OrderedDict([
+                            ('row_norms_min'  , row_norms.min()),
+                            ('row_norms_mean' , row_norms.mean()),
+                            ('row_norms_max'  , row_norms.max()),
+                            ('col_norms_min'  , col_norms.min()),
+                            ('col_norms_mean' , col_norms.mean()),
+                            ('col_norms_max'  , col_norms.max()),
+                            ])
+
+    def get_monitoring_channels_from_state(self, state, target=None):
+
+        mx = state.max(axis=1)
+
+        rval =  OrderedDict([
+                ('mean_max_class' , mx.mean()),
+                ('max_max_class' , mx.max()),
+                ('min_max_class' , mx.min())
+        ])
+
+        if target is not None:
+            y_hat = T.argmax(state, axis=1)
+            y = T.argmax(target, axis=1)
+            misclass = T.neq(y, y_hat).mean()
+            misclass = T.cast(misclass, config.floatX)
+            rval['misclass'] = misclass
+            rval['nll'] = self.cost(Y_hat=state, Y=target)
+
+        return rval
+
+    def set_input_space(self, space):
+        self.input_space = space
+
+        if not isinstance(space, Space):
+            raise TypeError("Expected Space, got "+
+                    str(space)+" of type "+str(type(space)))
+
+        self.input_dim = space.get_total_dimension()
+        self.needs_reformat = not isinstance(space, VectorSpace)
+
+        if self.no_affine:
+            desired_dim = self.n_classes
+            assert self.input_dim == desired_dim
+        else:
+            desired_dim = self.input_dim
+        self.desired_space = VectorSpace(desired_dim)
+
+        if not self.needs_reformat:
+            assert self.desired_space == self.input_space
+
+        rng = self.mlp.rng
+
+        if self.no_affine:
+            self._params = []
+        else:
+            if self.irange is not None:
+                assert self.istdev is None
+                assert self.sparse_init is None
+                W = rng.uniform(-self.irange,self.irange, (self.input_dim,self.n_classes))
+            elif self.istdev is not None:
+                assert self.sparse_init is None
+                W = rng.randn(self.input_dim, self.n_classes) * self.istdev
+            else:
+                assert self.sparse_init is not None
+                W = np.zeros((self.input_dim, self.n_classes))
+                for i in xrange(self.n_classes):
+                    for j in xrange(self.sparse_init):
+                        idx = rng.randint(0, self.input_dim)
+                        while W[idx, i] != 0.:
+                            idx = rng.randint(0, self.input_dim)
+                        W[idx, i] = rng.randn()
+
+            self.W = sharedX(W,  'softmax_W' )
+
+            self._params = [ self.b, self.W ]
+
+        priors = self.__load_kaldi_priors(self.kaldi_priors)
+        self.log_priors = sharedX(priors, "log_priors")
+
+    def get_weights_topo(self):
+        if not isinstance(self.input_space, Conv2DSpace):
+            raise NotImplementedError()
+        desired = self.W.get_value().T
+        ipt = self.desired_space.format_as(desired, self.input_space)
+        rval = Conv2DSpace.convert_numpy(ipt, self.input_space.axes, ('b', 0, 1, 'c'))
+        return rval
+
+    def get_weights(self):
+        if not isinstance(self.input_space, VectorSpace):
+            raise NotImplementedError()
+
+        return self.W.get_value()
+
+    def set_weights(self, weights):
+        self.W.set_value(weights)
+
+    def set_biases(self, biases):
+        self.b.set_value(biases)
+
+    def get_biases(self):
+        return self.b.get_value()
+
+    def get_weights_format(self):
+        return ('v', 'h')
+
+    def fprop(self, state_below):
+
+        self.input_space.validate(state_below)
+
+        if self.needs_reformat:
+            state_below = self.input_space.format_as(state_below, self.desired_space)
+
+        for value in get_debug_values(state_below):
+            if self.mlp.batch_size is not None and value.shape[0] != self.mlp.batch_size:
+                raise ValueError("state_below should have batch size "+str(self.dbm.batch_size)+" but has "+str(value.shape[0]))
+
+        self.desired_space.validate(state_below)
+        assert state_below.ndim == 2
+
+        if not hasattr(self, 'no_affine'):
+            self.no_affine = False
+
+        if self.no_affine:
+            Z = state_below
+        else:
+            assert self.W.ndim == 2
+            b = self.b
+
+            Z = T.dot(state_below, self.W) + b
+
+        if not self.skip_softmax:
+            Z = T.nnet.softmax(Z)
+            rval = T.log(Z) - self.log_priors
+        else:
+            rval = Z - self.log_priors
+
+        for value in get_debug_values(rval):
+            if self.mlp.batch_size is not None:
+                assert value.shape[0] == self.mlp.batch_size
+
+        return rval
+
+    def get_weight_decay(self, coeff):
+        if isinstance(coeff, str):
+            coeff = float(coeff)
+        assert isinstance(coeff, float) or hasattr(coeff, 'dtype')
+        return coeff * T.sqr(self.W).sum()
+
+    def get_l1_weight_decay(self, coeff):
+        if isinstance(coeff, str):
+            coeff = float(coeff)
+        assert isinstance(coeff, float) or hasattr(coeff, 'dtype')
+        W = self.W
+        return coeff * abs(W).sum()
+
+    def censor_updates(self, updates):
+        if self.no_affine:
+            return
+        if self.max_row_norm is not None:
+            W = self.W
+            if W in updates:
+                updated_W = updates[W]
+                row_norms = T.sqrt(T.sum(T.sqr(updated_W), axis=1))
+                desired_norms = T.clip(row_norms, 0, self.max_row_norm)
+                updates[W] = updated_W * (desired_norms / (1e-7 + row_norms)).dimshuffle(0, 'x')
+        if self.max_col_norm is not None:
+            assert self.max_row_norm is None
+            W = self.W
+            if W in updates:
+                updated_W = updates[W]
+                col_norms = T.sqrt(T.sum(T.sqr(updated_W), axis=0))
+                desired_norms = T.clip(col_norms, 0, self.max_col_norm)
+                updates[W] = updated_W * (desired_norms / (1e-7 + col_norms))
+
+    def cost(self, Y, Y_hat):
+        return self.cost_from_cost_matrix(self.cost_matrix(Y, Y_hat))
+
+    def cost_from_cost_matrix(self, cost_matrix):
+        return cost_matrix.sum(axis=1).mean()
+
+    def cost_matrix(self, Y, Y_hat):
+        """
+
+        :param Y:
+        :param Y_hat:
+        :return:
+        """
+
+        if not self.skip_softmax:
+
+            assert hasattr(Y_hat, 'owner')
+
+            #get inputs for cd task
+            owner = Y_hat.owner
+            assert owner is not None
+            op = owner.op
+            if isinstance(op, Print):
+                assert len(owner.inputs) == 1
+                Y_hat, = owner.inputs
+                owner = Y_hat.owner
+                op = owner.op
+            assert isinstance(op, T.nnet.Softmax)
+            z ,= owner.inputs
+            assert z.ndim == 2
+
+            z = z - z.max(axis=1).dimshuffle(0, 'x')
+
+        else:
+            #loglikes = z.get_value(borrow=True)
+            #targets = Y.get_value(borrow=True)
+            rval = Y*Y_hat
+
+            return rval.sum(axis=1).mean()
+
+
+
+            #f=tempfile.SpooledTemporaryFile(max_size=409715200) #keep up to 200MB in memory
+            #write_ark_entry_to_buffer(f, uttid, loglikes)
+            #kaldi_grads, kaldi_stderr = self.__lattice_fwdback(f)
+
+        return
+
+    def __lattice_fwdback(self, kaldi_loglikes):
+        try:
+            kaldi_grads, kaldi_stderr = self.lat_call.communicate(input=kaldi_loglikes)
+            return kaldi_grads, kaldi_stderr
+        except CalledProcessError as cpe:
+            print 'CPE', cpe
+            return None
+        except OSError as oe:
+            print 'OE', oe
+            return None
+        except ValueError as ve:
+            print 'VE', ve
+            return None
+        return None
+
+    def __load_kaldi_priors(self, path, uniform_smoothing_scaler=0.05):
+        assert 0 <= uniform_smoothing_scaler <= 1.0, (
+            "Expected 0 <= uniform_smoothing_scaler <=1, got %f"%uniform_smoothing_scaler
+        )
+        numbers=np.fromregex(path, r"([\d\.e+]+)", dtype=[('num', np.float32)])
+        class_counts=np.asarray(numbers['num'], dtype=config.floatX)
+        #compute the uniform smoothing count
+        uniform_priors = np.ceil(class_counts.mean()*uniform_smoothing_scaler)
+        priors = (class_counts + uniform_priors)/class_counts.sum()
+        #floor zeroes to something small so log() on that will be different from -inf or better skip these in contribution at all i.e. set to -log(0)?
+        flooring=1e-9
+        priors[priors<flooring] = flooring
+        assert np.all(priors > 0) and np.all(priors <= 1.0), (
+            "Prior probabilities outside [0,1] range."
+        )
+        log_priors = np.log(priors)
+        assert not np.any(np.isinf(log_priors)), (
+            "Log-priors contain -inf elements."
+        )
+        return log_priors

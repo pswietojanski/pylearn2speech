@@ -32,7 +32,7 @@ from pylearn2.utils import sharedX
 from pylearn2.utils.data_specs import DataSpecsMapping
 from pylearn2.utils.timing import log_timing
 
-
+logging.warning('Starting logger for adaptation.py')
 log = logging.getLogger(__name__)
 
 class SGD(TrainingAlgorithm):
@@ -866,6 +866,7 @@ class LinearDecayOverEpoch(TrainExtension):
             new_lr = self._init_lr
         assert new_lr > 0
         return new_lr
+
 
 class LinearDropoutDecayOverEpoch(TrainExtension):
     """
