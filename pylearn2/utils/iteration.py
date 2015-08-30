@@ -560,7 +560,7 @@ class QueuedDatasetIterator(object):
                 "format, which will then be formatted into desired concatenated format that"
                 "model input space is expected to get"
             )
-            features, spk_idx_mbatch, labels = rval
+            features, labels, spk_idx_mbatch = rval
             features = numpy.asarray(numpy.concatenate((features, spk_idx_mbatch.reshape(-1,1)), axis=1), dtype=numpy.float32)
             rval = (features, labels)
 

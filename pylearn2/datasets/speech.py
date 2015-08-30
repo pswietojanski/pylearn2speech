@@ -224,12 +224,14 @@ class SpeechDatasetProvider(Dataset):
     def __init__(self,
                  provider,
                  preprocessor=None,
-                 is_sat=False):
+                 is_sat=False,
+                 utt_based=False):
 
         #self.args = locals()
         self.provider = provider
         self.preprocessor = preprocessor
         self.is_sat=is_sat
+        self.utt_based=utt_based
 
         # will be instantiated by self.iterator() when asked for
         # by training code
@@ -336,7 +338,8 @@ class SpeechDatasetProvider(Dataset):
                                           provider=self.provider,
                                           batch_size=batch_size,
                                           preprocessor=self.preprocessor,
-                                          is_sat=self.is_sat)
+                                          is_sat=self.is_sat,
+                                          utt_based=self.utt_based)
         self._cache.start()
 
         return QueuedDatasetIterator(queue=self._queue,

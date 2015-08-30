@@ -225,7 +225,7 @@ class GpuFilterActs(Base):
 
 
 @register_opt()
-@local_optimizer([])
+@local_optimizer(None)
 def insert_gpu_filter_acts(node):
     if isinstance(node.op, FilterActs):
         images, filters = node.inputs
@@ -440,7 +440,7 @@ class GpuWeightActs(Base):
 
 
 @register_opt()
-@local_optimizer([])
+@local_optimizer(None)
 def insert_gpu_weight_acts(node):
     if isinstance(node.op, WeightActs):
         images, hidacts, frows, fcols = node.inputs
@@ -651,7 +651,7 @@ class GpuImgActs(Base):
 
 
 @register_opt()
-@local_optimizer([])
+@local_optimizer(None)
 def insert_gpu_img_acts(node):
     if isinstance(node.op, ImgActs):
         filters, hidacts, irows, icols = node.inputs

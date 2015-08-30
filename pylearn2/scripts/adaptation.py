@@ -10,7 +10,7 @@ import logging
 from argparse import ArgumentParser
 from pylearn2.utils import serial, sharedX
 
-log = logging.getLogger(__name__)
+log = logging.getLogger()
 
 def load_params_from_list_of_hdfs(files_list, override=True):
     assert files_list is not None and files_list != "", (

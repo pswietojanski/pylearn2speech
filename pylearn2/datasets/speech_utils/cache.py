@@ -54,7 +54,8 @@ class Pylearn2CacheSimple(Pylearn2Cache):
                  provider,
                  batch_size,
                  preprocessor=None,
-                 is_sat=False):
+                 is_sat=False,
+                 utt_based=False):
 
         super(Pylearn2CacheSimple, self).\
             __init__(queue=queue,
@@ -64,10 +65,14 @@ class Pylearn2CacheSimple(Pylearn2Cache):
 
         #TODO: add here an assert for SpliceFrames preprocessor in case
         #provider is utt based, not random...
-        self.provider = BufferedProviderDataSpec(provider, batch_size)
+        if utt_based is False:
+            self.provider = BufferedProviderDataSpec(provider, batch_size)
+        else:
+            self.provider = provider
         self.lfreq = 2 ** 20  # print progress/efficiency stats after 1M examples
         self.num_classes = self.provider.num_classes()
         self.is_sat = is_sat
+        self.utt_based = utt_based
 
     def run(self):
 
@@ -92,7 +97,7 @@ class Pylearn2CacheSimple(Pylearn2Cache):
             else:
                 data, y = xy
 
-            if self.is_sat is False:
+            if self.is_sat is False and self.utt_based is False:
                 if isinstance(y, (list, tuple)):
                     assert isinstance(self.num_classes, (list, tuple)) and \
                            len(y) == len(self.num_classes), (
@@ -111,8 +116,8 @@ class Pylearn2CacheSimple(Pylearn2Cache):
                 assert len(y) == 2, (
                     "For sat training expected to get length 2 (speaker_indexes, labels) got %f "%len(y)
                 )
-                rval_y = self.convert_to_one_hot(y[1], self.num_classes[0], 0)
-                new_y = (y[0], rval_y)
+                rval_y = self.convert_to_one_hot(y[0], self.num_classes[0], 0)
+                new_y = (rval_y, y[1])
 
 
             rval = (data,) + new_y

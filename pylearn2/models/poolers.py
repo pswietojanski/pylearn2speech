@@ -2150,7 +2150,7 @@ class MultiplicativeSATAdapter(Layer):
         """
 
         assert constraint in ['sigmoid', 'exp', 'relu', 'none']
-        assert si_fprop_mode in ['unit_gain', 'sat_avg', 'sat_avg_norm']
+        assert si_fprop_mode in ['si_trans', 'unit_gain', 'sat_avg', 'sat_avg_norm']
         assert num_speakers > 0, (
             "For training, num_speakers is expected to be equal to"
             "the number of speakers found in training data."
@@ -2233,14 +2233,15 @@ class MultiplicativeSATAdapter(Layer):
 
         z = state_below
 
+        s = self.u[0, :]
         if self.constraint == "sigmoid":
-            amp = 2*T.nnet.sigmoid(self.u)
+            amp = 2*T.nnet.sigmoid(s)
         elif self.constraint == "exp":
-            amp = T.exp(self.u)
+            amp = T.exp(s)
         elif self.constraint == "relu":
-            amp = T.maximum(0.0, self.u)
+            amp = T.maximum(0.0, s)
         else:
-            amp = self.u
+            amp = s
 
         #for now, in case of si frop, we simply multiply it by 1.0
         #the last element in u is reserved for this
@@ -2249,7 +2250,7 @@ class MultiplicativeSATAdapter(Layer):
         elif self.si_fprop_mode == 'sat_avg_norm':
             amp = T.mean(amp, axis=0)
         else:
-            amp = amp[-1,:]
+            amp = amp
 
         a = z*amp
 
@@ -2264,7 +2265,6 @@ class MultiplicativeSATAdapter(Layer):
             state_below = self.input_space.format_as(state_below, self.desired_space)
 
         s = self.u[T.cast(spk_idx, dtype='int32'), :]
-        #s = self.u[-1, :]
         if self.constraint == "sigmoid":
             amp = 2*T.nnet.sigmoid(s)
         elif self.constraint == "exp":
@@ -2281,6 +2281,367 @@ class MultiplicativeSATAdapter(Layer):
         self.output_space.validate(a)
 
         return a
+
+
+class SATLpPooler(Layer):
+    """
+    This code implements the functionality proposed in:
+    Learn p-norm units.
+
+    Note: this is not the official code from the authors.
+    """
+
+    def __init__(self,
+                 layer_name,
+                 num_speakers,
+                 pool_size,
+                 pool_stride = None,
+                 init_p = 2.0,
+                 init_b = 0.0,
+                 init_c = 0.0,
+                 center_bias = False,
+                 post_bias = False,
+                 p_order_constraints = [1.5,10.],
+                 p_lr_scale = None,
+                 c_lr_scale = None,
+                 b_lr_scale = None,
+                 pool_normalisation = False,
+                 mv_normalisation = False,
+                 min_zero = False,
+                 reparam_p = 'softplus'
+        ):
+        """
+
+        """
+
+        assert reparam_p in ['softplus', 'rect']
+
+        if pool_stride is None:
+            pool_stride = pool_size
+
+        self.__dict__.update(locals())
+        del self.self
+
+    def get_lr_scalers(self):
+
+        if not hasattr(self, 'p_lr_scale'):
+            self.p_lr_scale = None
+        if not hasattr(self, 'b_lr_scale'):
+            self.b_lr_scale = None
+        if not hasattr(self, 'c_lr_scale'):
+            self.c_lr_scale = None
+
+        rval = OrderedDict()
+
+        if self.p_lr_scale is not None:
+            rval[self.p] = self.p_lr_scale
+
+        if self.b_lr_scale is not None:
+            rval[self.b] = self.b_lr_scale
+
+        if self.c_lr_scale is not None:
+            rval[self.c] = self.c_lr_scale
+
+        return rval
+
+    def set_input_space(self, space):
+        """ Note: this resets parameters! """
+
+        self.input_space = space
+
+        if isinstance(space, VectorSpace):
+            self.requires_reformat = False
+            self.input_dim = space.dim
+        else:
+            self.requires_reformat = True
+            self.input_dim = space.get_total_dimension()
+            self.desired_space = VectorSpace(self.input_dim)
+
+        self.detector_layer_dim = self.input_dim
+        if not ((self.detector_layer_dim - self.pool_size) % self.pool_stride == 0):
+            if self.pool_stride == self.pool_size:
+                raise ValueError("detector_layer_dim = %d, pool_size = %d. Should be divisible but remainder is %d" %
+                             (self.detector_layer_dim, self.pool_size, self.detector_layer_dim % self.pool_size))
+            raise ValueError()
+
+        self.h_space = VectorSpace(self.detector_layer_dim)
+        self.pool_layer_dim = (self.detector_layer_dim - self.pool_size)/ self.pool_stride + 1
+        self.output_space = VectorSpace(self.pool_layer_dim)
+
+        rng = self.mlp.rng
+        if self.init_p > 1.0:
+            if self.reparam_p == 'softplus':
+                init_rho_order = np.log(np.exp(self.init_p-1)-1)
+            elif self.reparam_p == 'rect':
+                init_rho_order = self.init_p
+            self.p = sharedX( np.zeros((self.num_speakers + 1, self.pool_layer_dim,))
+                              + init_rho_order, name = self.layer_name + '_p')
+        else:
+            p0 = np.log(np.exp(self.p_order_constraints[0]-1)-1)
+            pk = np.log(np.exp(self.p_order_constraints[1]-1)-1)
+            self.p = sharedX( np.random.uniform(p0, pk, (self.num_speakers + 1, self.pool_layer_dim,)),
+                              name = self.layer_name + '_p')
+
+        if self.center_bias:
+            self.c = sharedX( np.zeros((self.detector_layer_dim,)) + self.init_c, name = self.layer_name + '_c')
+        else:
+            assert self.c_lr_scale is None
+
+        if self.post_bias:
+            self.b = sharedX( np.zeros((self.pool_layer_dim,)) + self.init_b, name = self.layer_name + '_b')
+        else:
+            self.b = sharedX( np.zeros((self.detector_layer_dim,)) + self.init_b, name = self.layer_name + '_b')
+
+    def censor_updates(self, updates):
+
+        # Patch old pickle files
+        if not hasattr(self, 'mask_weights'):
+            self.mask_weights = None
+
+
+    def get_params(self):
+        rval = []
+
+        assert self.p.name is not None
+        assert self.p not in rval
+        rval.append(self.p)
+
+        assert self.b.name is not None
+        assert self.b not in rval
+        rval.append(self.b)
+
+        if self.center_bias:
+            assert self.c.name is not None
+            assert self.c not in rval
+            rval.append(self.c)
+
+        return rval
+
+    def get_weight_decay(self, coeff):
+        raise NotImplementedError()
+
+    def get_l1_weight_decay(self, coeff):
+        raise NotImplementedError()
+
+    def get_monitoring_channels(self):
+
+        if self.reparam_p == 'softplus':
+            toLp  = lambda x: 1+T.log(T.exp(x)+1)
+        elif self.reparam_p == 'rect':
+            toLp = lambda x: T.maximum(1., x)
+
+        rval =  OrderedDict([
+                            ('p_orders_min'  , toLp(self.p.min())),
+                            ('p_orders_mean' , toLp(self.p.mean())),
+                            ('p_orders_max'  , toLp(self.p.max())),
+                            ('p_orders_std'  , toLp(self.p.std())),
+                            ('b_min', self.b.min()),
+                            ('b_mean',  self.b.mean()),
+                            ('b_max',  self.b.max()),
+                            ('b_std',  self.b.std())
+                            ])
+
+        if self.center_bias:
+            rval['c_min'] = self.c.min()
+            rval['c_mean'] = self.c.mean()
+            rval['c_max'] = self.c.max()
+            rval['c_std'] = self.c.std()
+
+        return rval
+
+    def get_monitoring_channels_from_state(self, state):
+
+        P = state
+
+        rval = OrderedDict()
+
+        if self.pool_size == 1:
+            vars_and_prefixes = [ (P,'') ]
+        else:
+            vars_and_prefixes = [ (P, 'p_') ]
+
+        for var, prefix in vars_and_prefixes:
+            v_max = var.max(axis=0)
+            v_min = var.min(axis=0)
+            v_mean = var.mean(axis=0)
+            v_range = v_max - v_min
+
+            # max_x.mean_u is "the mean over *u*nits of the max over e*x*amples"
+            # The x and u are included in the name because otherwise its hard
+            # to remember which axis is which when reading the monitor
+            # I use inner.outer rather than outer_of_inner or something like that
+            # because I want mean_x.* to appear next to each other in the alphabetical
+            # list, as these are commonly plotted together
+            for key, val in [
+                             ('max_x.max_u', v_max.max()),
+                             ('max_x.mean_u', v_max.mean()),
+                             ('max_x.min_u', v_max.min()),
+                             ('min_x.max_u', v_min.max()),
+                             ('min_x.mean_u', v_min.mean()),
+                             ('min_x.min_u', v_min.min()),
+                             ('range_x.max_u', v_range.max()),
+                             ('range_x.mean_u', v_range.mean()),
+                             ('range_x.min_u', v_range.min()),
+                             ('mean_x.max_u', v_mean.max()),
+                             ('mean_x.mean_u', v_mean.mean()),
+                             ('mean_x.min_u', v_mean.min())
+                             ]:
+                rval[prefix+key] = val
+
+        return rval
+
+    def fprop(self, state_below):
+
+        self.input_space.validate(state_below)
+
+        if self.requires_reformat:
+            if not isinstance(state_below, tuple):
+                for sb in get_debug_values(state_below):
+                    if sb.shape[0] != self.dbm.batch_size:
+                        raise ValueError("self.dbm.batch_size is %d but got shape of %d" % (self.dbm.batch_size, sb.shape[0]))
+                    assert reduce(lambda x,y: x * y, sb.shape[1:]) == self.input_dim
+
+            state_below = self.input_space.format_as(state_below, self.desired_space)
+
+        z = state_below
+
+        if self.post_bias is False:
+            z = z + self.b
+
+        if not hasattr(self, 'pool_stride'):
+            self.pool_stride = self.pool_size
+
+        if not hasattr(self, 'min_zero'):
+            self.min_zero = False
+
+        p_spk = self.p[0, :]
+
+        if self.reparam_p == 'softplus':
+            pr = 1 + T.log(1 + T.exp(p_spk))
+        elif self.reparam_p == 'rect':
+            pr = T.maximum(1., p_spk)
+        else:
+            raise Exception('WTF?')
+
+        epsilon = 1e-10
+
+        z_act = z
+        if self.center_bias:
+            z_act = z_act - self.c.dimshuffle('x',0)
+
+        if self.min_zero:
+            z_act = T.maximum(z_act, 0)
+        else:
+            z_act = T.maximum(T.abs_(z_act), epsilon) # fix to gradients w.r.t p in case sum_i x_i**p is close to or 0
+
+        p, s = None, None
+        last_start = self.detector_layer_dim  - self.pool_size
+        for i in xrange(self.pool_size):
+            cur = z_act[:,i:last_start+i+1:self.pool_stride]
+            cur = cur**pr
+            if p is None:
+                p = cur
+            else:
+                p = p + cur
+
+        if self.pool_normalisation:
+            p = p*(1.0/self.pool_size)
+
+        p = T.maximum(p, epsilon) # fix to gradients w.r.t x in case sum_i x_i**p is close to or 0
+        p = p**(1.0/pr)
+
+        self.post_pool_normalisation = False
+        if self.post_pool_normalisation:
+            p = p/self.pool_size
+
+        if self.post_bias:
+            p = p + self.b
+
+        if self.mv_normalisation:
+            stddev = T.sqrt(T.mean(T.sqr(p), axis=1)).dimshuffle(0,'x')
+            p = p*(1.0/stddev)*(stddev>1) + p*(stddev<=1)
+
+        p.name = self.layer_name + '_p_'
+
+        return p
+
+    def fprop_sat(self, state_below, spk_idx):
+
+        self.input_space.validate(state_below)
+
+        if self.requires_reformat:
+            if not isinstance(state_below, tuple):
+                for sb in get_debug_values(state_below):
+                    if sb.shape[0] != self.dbm.batch_size:
+                        raise ValueError("self.dbm.batch_size is %d but got shape of %d" % (self.dbm.batch_size, sb.shape[0]))
+                    assert reduce(lambda x,y: x * y, sb.shape[1:]) == self.input_dim
+
+            state_below = self.input_space.format_as(state_below, self.desired_space)
+
+        z = state_below
+
+        if self.post_bias is False:
+            z = z + self.b
+
+        if not hasattr(self, 'pool_stride'):
+            self.pool_stride = self.pool_size
+
+        if not hasattr(self, 'min_zero'):
+            self.min_zero = False
+
+        p_spk = self.p[T.cast(spk_idx, dtype='int32'), :]
+
+        if self.reparam_p == 'softplus':
+            pr = 1 + T.log(1 + T.exp(p_spk))
+        elif self.reparam_p == 'rect':
+            pr = T.maximum(1., p_spk)
+        else:
+            raise Exception('WTF?')
+
+        epsilon = 1e-10
+
+        z_act = z
+        if self.center_bias:
+            z_act = z_act - self.c.dimshuffle('x',0)
+
+        if self.min_zero:
+            z_act = T.maximum(z_act, 0)
+        else:
+            z_act = T.maximum(T.abs_(z_act), epsilon) # fix to gradients w.r.t p in case sum_i x_i**p is close to or 0
+
+        p, s = None, None
+        last_start = self.detector_layer_dim  - self.pool_size
+        for i in xrange(self.pool_size):
+            cur = z_act[:,i:last_start+i+1:self.pool_stride]
+            cur = cur**pr
+            if p is None:
+                p = cur
+            else:
+                p = p + cur
+
+        if self.pool_normalisation:
+            p = p*(1.0/self.pool_size)
+
+        p = T.maximum(p, epsilon) # fix to gradients w.r.t x in case sum_i x_i**p is close to or 0
+        p = p**(1.0/pr)
+
+        self.post_pool_normalisation = False
+        if self.post_pool_normalisation:
+            p = p/self.pool_size
+
+        if self.post_bias:
+            p = p + self.b
+
+        if self.mv_normalisation:
+            stddev = T.sqrt(T.mean(T.sqr(p), axis=1)).dimshuffle(0,'x')
+            p = p*(1.0/stddev)*(stddev>1) + p*(stddev<=1)
+
+        p.name = self.layer_name + '_p_'
+
+        return p
+
+    def foo(self, state_below):
+        raise NotImplementedError();
 
 
 class RecurrentMultiplicativeAdapter(Layer):

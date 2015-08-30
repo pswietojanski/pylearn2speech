@@ -228,7 +228,7 @@ class TestImgActs(unittest.TestCase):
             return self.op(filts, self.s_hidacts, self.irows, self.icols)
         assert_linear(f, self.s_filters)
 
-    def test_linearity_hidacts(self):
+    def test_linearity_hidac ts(self):
         def f(hidacts):
             return self.op(self.s_filters, hidacts, self.irows, self.icols)
         assert_linear(f, self.s_hidacts)

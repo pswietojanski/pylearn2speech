@@ -387,6 +387,7 @@ class KaldiSATAlignFeatsProviderUtt(KaldiAlignFeatsProviderUtt):
                  targets_dim,
                  utt2spk_map=None,
                  fake_utt2spk_map=False,
+                 si_sd_training_ratio=0.1,
                  template_shell_command=None,
                  randomize=False,
                  max_time=-1,
@@ -419,6 +420,7 @@ class KaldiSATAlignFeatsProviderUtt(KaldiAlignFeatsProviderUtt):
                     mapped=mapped)
 
         self.fake_utt2spk_map = fake_utt2spk_map
+        self.si_sd_training_ratio = si_sd_training_ratio
 
         if not self.fake_utt2spk_map:
             assert utt2spk_map is not None
@@ -429,7 +431,7 @@ class KaldiSATAlignFeatsProviderUtt(KaldiAlignFeatsProviderUtt):
                     utt, spk = line.strip().split(None, 1)
                     if spk not in spk2idx.keys():
                         if len(spk2idx) == 0:
-                            spk2idx[spk] = 0
+                            spk2idx[spk] = 1
                         else:
                             spk2idx[spk] = max(spk2idx.values())+1
                     self.utt2spk_and_idx[utt] = [spk, spk2idx[spk]]
@@ -437,12 +439,12 @@ class KaldiSATAlignFeatsProviderUtt(KaldiAlignFeatsProviderUtt):
             log.warning('Found %d distinct speakers in data' % len(spk2idx))
         else:
             log.warning('Speaker labels will be faked, but data specs'
-                        'will stay compatible with the expected ones for sat interface.')
+                        'will stay compatible with the expected one for sat interface.')
 
         feats_space = VectorSpace(dim=self.feats_dim)
         spk_idx_space = VectorSpace(dim=1)
         targets_space = VectorSpace(dim=self.targets_dim)
-        self.data_spec = (CompositeSpace([feats_space, spk_idx_space, targets_space]), ('features', 'speaker_indexes', 'targets'))
+        self.data_spec = (CompositeSpace([feats_space, targets_space, spk_idx_space]), ('features', 'targets', 'speaker_indexes'))
 
     def __iter__(self):
         return self
@@ -459,7 +461,7 @@ class KaldiSATAlignFeatsProviderUtt(KaldiAlignFeatsProviderUtt):
 
         spk_idx_mbatch = None
         if (features is not None and labels is not None):
-            if self.fake_utt2spk_map:
+            if self.fake_utt2spk_map or self.si_sd_training_ratio == 1.0:
                 spk_idx_mbatch = numpy.zeros_like(labels)
             else:
                 utt_path = self.files_list[self.index-1] #ugly way to do so!
@@ -467,7 +469,21 @@ class KaldiSATAlignFeatsProviderUtt(KaldiAlignFeatsProviderUtt):
                 spk_idx = self.utt2spk_and_idx[utt][1]
                 spk_idx_mbatch = numpy.ones_like(labels)*spk_idx
 
-        return features, spk_idx_mbatch, labels
+                if self.si_sd_training_ratio is not None \
+                        and self.si_sd_training_ratio > 0:
+
+                    assert self.si_sd_training_ratio < 1.0, (
+                        "si_sd_training_ratio expected to be "
+                        "between 0.0 and 1.0, got %f"%self.si_sd_training_ratio
+                    )
+
+                    bsize = spk_idx_mbatch.shape[0]
+                    size = int(bsize*self.si_sd_training_ratio)
+                    indexes = numpy.random.randint(low=0, high=bsize, size=size)
+                    #print 'Indexes are', indexes
+                    spk_idx_mbatch[indexes] = 0 #0 means speaker-independent transform
+
+        return features, labels, spk_idx_mbatch
 
     def num_classes(self):
         return [self.targets_dim]

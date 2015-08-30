@@ -344,11 +344,16 @@ class MLP(Layer):
                     warnings.warn('Parameter %s not found in %s. Will use initial parameters.'%(param.name, params_dict.keys()))
                     continue
                     #raise Exception('Parameter %s not found in %s'%(param.name, str(params_dict)))
-                assert param.get_value().shape == params_dict[param.name].shape, (
-                    "Parameter %s was created with shape %s so cannot set values with shape %s."%\
-                    (param.name, param.get_value().shape, params_dict[param.name].shape)
-                )
-                param.set_value(params_dict[param.name], borrow=False)
+                #assert param.get_value().shape == params_dict[param.name].shape, (
+                #    "Parameter %s was created with shape %s so cannot set values with shape %s."%\
+                #    (param.name, param.get_value().shape, params_dict[param.name].shape)
+                #)
+                #hack for sat
+                if param.get_value().shape != params_dict[param.name].shape and \
+                   param.get_value().shape[0] == params_dict[param.name].shape[1]:
+                    param.set_value(params_dict[param.name][0,:], borrow=False)
+                else:
+                    param.set_value(params_dict[param.name], borrow=False)
                 #if param.get_value().shape == params_dict[param.name].shape:
                 #    param.set_value(params_dict[param.name], borrow=False)
                 #print 'Swapping %s'%param.name

@@ -83,9 +83,9 @@ if [ ! -z "$CNN_CONF" ]; then
 fi
 
 if [ "$NUMLIB" == "atlas" ]; then
-  NUMFLAGS=$ATLASF
+  NUMFLAGS="blas.ldflags=$ATLASF"
 elif [ "$NUMLIB" == "mkl" ]; then
-  NUMFLAGS=$MKLF
+  NUMFLAGS="blas.ldflags=$MKLF"
 else
   NUMFLAGS=""
 fi
@@ -131,10 +131,13 @@ if [ $OMP_NUM_THREADS -gt 1 ]; then
 fi
 
 THEANO_FLAGS="device=$DEVICE, openmp=$USE_OPENMP, floatX=float32, force_device=True, print_active_device=False, nvcc.fastmath=True, exception_verbosity=high, profile=$PROFILE, allow_gc=$ASYNC"
-THEANO_FLAGS="$THEANO_FLAGS, blas.ldflags=$NUMFLAGS"
+THEANO_FLAGS="$THEANO_FLAGS, $NUMFLAGS"
+#THEANO_FLAGS="$THEANO_FLAGS, optimizer_including=conv_fft_valid"
 
 if [ $USE_CUDNN -eq 1 ]; then
   THEANO_FLAGS="$THEANO_FLAGS, optimizer_including=cudnn"
+else
+  THEANO_FLAGS="$THEANO_FLAGS, optimizer_excluding=conv_dnn"
 fi
 
 if [ "$MODE" == "PROFILE_MODE" ]; then

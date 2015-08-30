@@ -86,6 +86,10 @@ def make_argument_parser():
                         choices=None,
                         help='A YAML configuration file specifying the '
                              'training procedure')
+    parser.add_argument('--init-pytables',
+                        dest="init_pytables",
+                        default=None,
+                        help="A HDF/pytable file to load initial weights from (mapped by parameter names).")
     return parser
 
 
@@ -98,6 +102,10 @@ if __name__ == "__main__":
         iterable = True
     except TypeError as e:
         iterable = False
+
+    if args.init_pytables is not None:
+        params = serial.load_params_from_pytables(args.init_pytables)
+        train_obj.model.set_params(params)
 
     # Undo our custom logging setup.
     restore_defaults()
