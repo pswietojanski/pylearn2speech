@@ -561,7 +561,15 @@ class QueuedDatasetIterator(object):
                 "model input space is expected to get"
             )
             features, labels, spk_idx_mbatch = rval
-            features = numpy.asarray(numpy.concatenate((features, spk_idx_mbatch.reshape(-1,1)), axis=1), dtype=numpy.float32)
+            if features.ndim == 2:
+                features = numpy.asarray(
+                    numpy.concatenate((features, spk_idx_mbatch.reshape(-1, 1)), axis=1), dtype=numpy.float32)
+            elif features.ndim == 4:
+                features = numpy.asarray(
+                    numpy.concatenate((features, spk_idx_mbatch.reshape(-1, 1, 1, 1)), axis=-1), dtype=numpy.float32)
+            else:
+                raise Exception('QueuedDatasetIterator: Expected the features be be either matrix or 4D tensor.')
+
             rval = (features, labels)
 
         return rval

@@ -2083,20 +2083,18 @@ class SATDataInputConcSpaceConverter(Layer):
     def set_input_space(self, space):
 
         self.input_space = space
-
         if isinstance(space, VectorSpace):
             self.requires_reformat = False
             self.input_dim = space.dim
+            self.output_space = VectorSpace(self.input_dim-self.num_dims_to_cut)
+        elif isinstance(space, Conv2DSpace):
+            self.output_space = Conv2DSpace((space.shape[0], space.shape[1]-self.num_dims_to_cut),
+                                            num_channels=space.num_channels, axes=space.axes)
         else:
-            self.requires_reformat = True
-            self.feature_space = space.restrict([0])
-            self.input_dim =  self.feature_space.get_total_dimension()
-            self.desired_space = VectorSpace(self.input_dim)
+            raise Exception('Space conversions not supported here.')
 
-        self.output_space = VectorSpace(self.input_dim-self.num_dims_to_cut)
-
-        print 'Input dim ', self.input_dim
-        print 'Output dim ', self.output_space.dim
+        #print 'Input dim ', self.input_dim
+        #print 'Output dim ', self.output_space.dim
 
     def get_weights_topo(self):
         raise NotImplementedError()
@@ -2112,11 +2110,20 @@ class SATDataInputConcSpaceConverter(Layer):
 
     def fprop(self, state_below):
 
+        print self.input_space
+        print self.output_space
+
         self.input_space.validate(state_below)
-        if self.requires_reformat:
-            state_below = self.input_space.restrict_batch(state_below, [0])
-        z = state_below[:,0:-self.num_dims_to_cut]
+
+        if state_below.ndim == 2:
+            z = state_below[:,0:-self.num_dims_to_cut]
+        elif state_below.ndim == 4:
+            z = state_below[:, :, :, 0:-self.num_dims_to_cut]
+        else:
+            raise Exception('Only Vector and Con2D spaces allowed for SAT training!.')
+
         self.output_space.validate(z)
+
         return z
 
 
@@ -2229,8 +2236,6 @@ class MultiplicativeSATAdapter(Layer):
         if self.requires_reformat:
             state_below = self.input_space.format_as(state_below, self.desired_space)
 
-        self.output_space.validate(state_below)
-
         z = state_below
 
         s = self.u[0, :]
@@ -2253,8 +2258,8 @@ class MultiplicativeSATAdapter(Layer):
             amp = amp
 
         a = z*amp
-
         a.name = "_a_"
+        self.output_space.validate(a)
 
         return a
 
@@ -2275,9 +2280,7 @@ class MultiplicativeSATAdapter(Layer):
             amp = s
 
         a = state_below*amp
-
         a.name = "_a_"
-
         self.output_space.validate(a)
 
         return a

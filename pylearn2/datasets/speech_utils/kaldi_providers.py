@@ -496,6 +496,128 @@ class KaldiSATAlignFeatsProviderUtt(KaldiAlignFeatsProviderUtt):
         return self.data_spec
 
 
+class KaldiSAT2AlignFeatsProviderUtt(KaldiAlignFeatsProviderUtt):
+    """Data provider reading Kaldi archives and returning utterance-based
+    features and associated ground-truth labels from alignment files
+    this variant makes sampling at the segments level
+    """
+
+    def __init__(self,
+                 feats_scp,
+                 aligns_scp,
+                 feats_dim,
+                 targets_dim,
+                 utt2spk_map=None,
+                 fake_utt2spk_map=False,
+                 si_sd_training_ratio=0.1,
+                 template_shell_command=None,
+                 randomize=False,
+                 max_time=-1,
+                 max_utt=-1,
+                 frame_shift=10,
+                 mapped=False):
+        """
+
+        :param feats_scp:
+        :param aligns_scp:
+        :param template_shell_command:
+        :param randomize:
+        :param max_time:
+        :param max_utt:
+        :param frame_shift:
+        :param mapped:
+        :return: a tuple (features, targets) for a given utterance
+        """
+
+        super(KaldiSAT2AlignFeatsProviderUtt, self).\
+            __init__(feats_scp=feats_scp,
+                     aligns_scp=aligns_scp,
+                    feats_dim=feats_dim,
+                    targets_dim=targets_dim,
+                    template_shell_command=template_shell_command,
+                    randomize=randomize,
+                    max_time=max_time,
+                    max_utt=max_utt,
+                    frame_shift=frame_shift,
+                    mapped=mapped)
+
+        self.fake_utt2spk_map = fake_utt2spk_map
+        self.si_sd_training_ratio = si_sd_training_ratio
+
+        if not self.fake_utt2spk_map:
+            assert utt2spk_map is not None
+            self.utt2spk_and_idx = {} #keeps {utt:[spk idx]}
+            spk2idx = {}
+            with open(utt2spk_map, 'r') as f:
+                for line in f:
+                    utt, spk = line.strip().split(None, 1)
+                    if spk not in spk2idx.keys():
+                        if len(spk2idx) == 0:
+                            spk2idx[spk] = 1
+                        else:
+                            spk2idx[spk] = max(spk2idx.values())+1
+                    self.utt2spk_and_idx[utt] = [spk, spk2idx[spk]]
+
+            log.warning('Found %d distinct speakers in data' % len(spk2idx))
+        else:
+            log.warning('Speaker labels will be faked, but data specs'
+                        'will stay compatible with the expected one for sat interface.')
+
+        feats_space = VectorSpace(dim=self.feats_dim)
+        spk_idx_space = VectorSpace(dim=1)
+        targets_space = VectorSpace(dim=self.targets_dim)
+        self.data_spec = (CompositeSpace([feats_space, targets_space, spk_idx_space]), ('features', 'targets', 'speaker_indexes'))
+
+    def __iter__(self):
+        return self
+
+    def reset(self):
+        super(KaldiSAT2AlignFeatsProviderUtt, self).reset()
+
+    def next(self):
+
+        try:
+            features, labels = super(KaldiSAT2AlignFeatsProviderUtt, self).next()
+        except StopIteration:
+            raise StopIteration
+
+        spk_idx_mbatch = None
+        if (features is not None and labels is not None):
+            if self.fake_utt2spk_map or self.si_sd_training_ratio == 1.0:
+                spk_idx_mbatch = numpy.zeros_like(labels)
+            else:
+                utt_path = self.files_list[self.index-1] #ugly way to do so!
+                utt = utt_path.split(" ")[0]
+                spk_idx = self.utt2spk_and_idx[utt][1]
+                spk_idx_mbatch = numpy.ones_like(labels)*spk_idx
+
+                if self.si_sd_training_ratio is not None \
+                        and self.si_sd_training_ratio > 0:
+
+                    assert self.si_sd_training_ratio < 1.0, (
+                        "si_sd_training_ratio expected to be "
+                        "between 0.0 and 1.0, got %f"%self.si_sd_training_ratio
+                    )
+
+                    bsize = spk_idx_mbatch.shape[0]
+                    size = int(bsize*self.si_sd_training_ratio)
+                    indexes = numpy.random.randint(low=0, high=bsize, size=size)
+                    #print 'Indexes are', indexes
+                    spk_idx_mbatch[indexes] = 0 #0 means speaker-independent transform
+
+        return features, labels, spk_idx_mbatch
+
+    def num_classes(self):
+        return [self.targets_dim]
+
+    @property
+    def num_examples(self):
+        return self._num_examples
+
+    def get_data_specs(self):
+        return self.data_spec
+
+
 class KaldiSeqAlignFeatsProviderUtt(KaldiAlignFeatsProviderUtt):
     """Data provider reading Kaldi archives and returning utterance-based
     features and associated ground-truth labels from alignment files
@@ -507,6 +629,7 @@ class KaldiSeqAlignFeatsProviderUtt(KaldiAlignFeatsProviderUtt):
                  lat_scp,
                  feats_dim,
                  targets_dim,
+                 fake_lats=False,
                  template_shell_command=None,
                  randomize=False,
                  max_time=-1,
@@ -538,20 +661,25 @@ class KaldiSeqAlignFeatsProviderUtt(KaldiAlignFeatsProviderUtt):
                     frame_shift=frame_shift,
                     mapped=mapped)
 
+        self.fake_lats = fake_lats
         self.lat2idx = {}
-        with open(lat_scp, 'r') as lats:
-            for line in lats:
-                utt, xxx = line.strip().split(None, 1)
-                if utt not in self.lat2idx.keys():
-                    if len(self.lat2idx) == 0:
-                        self.lat2idx[utt] = 0
-                    else:
-                        self.lat2idx[utt] = max(self.lat2idx.values())+1
 
-        fi_set = set(self.files_info.keys())
-        ai_set = set(self.align_info.keys())
-        lat_set = set(self.lat2idx.keys())
-        iset = set.intersection(fi_set, ai_set, lat_set)
+        if not self.fake_lats:
+            with open(lat_scp, 'r') as lats:
+                for line in lats:
+                    utt, xxx = line.strip().split(None, 1)
+                    if utt not in self.lat2idx.keys():
+                        if len(self.lat2idx) == 0:
+                            self.lat2idx[utt] = 0
+                        else:
+                            self.lat2idx[utt] = max(self.lat2idx.values())+1
+
+            fi_set = set(self.files_info.keys())
+            ai_set = set(self.align_info.keys())
+            lat_set = set(self.lat2idx.keys())
+            iset = set.intersection(fi_set, ai_set, lat_set)
+        else:
+            iset = set.intersection(fi_set, ai_set)
 
         new_files_info, new_align_info, new_lat2idx = {}, {}, {}
         for k in iset:
@@ -615,7 +743,6 @@ class KaldiSeqAlignFeatsProviderUtt(KaldiAlignFeatsProviderUtt):
 
     def get_data_specs(self):
         return self.data_spec
-
 
 
 class FrameShuffler(object):
