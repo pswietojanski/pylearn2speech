@@ -388,6 +388,7 @@ class KaldiSATAlignFeatsProviderUtt(KaldiAlignFeatsProviderUtt):
                  utt2spk_map=None,
                  fake_utt2spk_map=False,
                  si_sd_training_ratio=0.1,
+                 si_sd_per_epoch=False,
                  template_shell_command=None,
                  randomize=False,
                  max_time=-1,
@@ -421,6 +422,7 @@ class KaldiSATAlignFeatsProviderUtt(KaldiAlignFeatsProviderUtt):
 
         self.fake_utt2spk_map = fake_utt2spk_map
         self.si_sd_training_ratio = si_sd_training_ratio
+        self.si_sd_per_epoch = si_sd_per_epoch
 
         if not self.fake_utt2spk_map:
             assert utt2spk_map is not None
@@ -474,14 +476,14 @@ class KaldiSATAlignFeatsProviderUtt(KaldiAlignFeatsProviderUtt):
 
                     assert self.si_sd_training_ratio < 1.0, (
                         "si_sd_training_ratio expected to be "
-                        "between 0.0 and 1.0, got %f"%self.si_sd_training_ratio
+                        "between 0.0 and 1.0, got %f" % self.si_sd_training_ratio
                     )
 
                     bsize = spk_idx_mbatch.shape[0]
-                    size = int(bsize*self.si_sd_training_ratio)
-                    indexes = numpy.random.randint(low=0, high=bsize, size=size)
+                    #size = int(bsize*self.si_sd_training_ratio)
+                    indexes = numpy.random.binomial(1, self.si_sd_training_ratio, bsize)
                     #print 'Indexes are', indexes
-                    spk_idx_mbatch[indexes] = 0 #0 means speaker-independent transform
+                    spk_idx_mbatch[numpy.where(indexes == 1)] = 0 #at 0th idx speaker-independent transform is kept
 
         return features, labels, spk_idx_mbatch
 
@@ -496,7 +498,7 @@ class KaldiSATAlignFeatsProviderUtt(KaldiAlignFeatsProviderUtt):
         return self.data_spec
 
 
-class KaldiSAT2AlignFeatsProviderUtt(KaldiAlignFeatsProviderUtt):
+class KaldiSATPerSpkAlignFeatsProviderUtt(KaldiAlignFeatsProviderUtt):
     """Data provider reading Kaldi archives and returning utterance-based
     features and associated ground-truth labels from alignment files
     this variant makes sampling at the segments level
@@ -510,6 +512,7 @@ class KaldiSAT2AlignFeatsProviderUtt(KaldiAlignFeatsProviderUtt):
                  utt2spk_map=None,
                  fake_utt2spk_map=False,
                  si_sd_training_ratio=0.1,
+                 si_sd_per_segment=False,
                  template_shell_command=None,
                  randomize=False,
                  max_time=-1,
@@ -529,7 +532,7 @@ class KaldiSAT2AlignFeatsProviderUtt(KaldiAlignFeatsProviderUtt):
         :return: a tuple (features, targets) for a given utterance
         """
 
-        super(KaldiSAT2AlignFeatsProviderUtt, self).\
+        super(KaldiSATPerSpkAlignFeatsProviderUtt, self).\
             __init__(feats_scp=feats_scp,
                      aligns_scp=aligns_scp,
                     feats_dim=feats_dim,
@@ -543,8 +546,10 @@ class KaldiSAT2AlignFeatsProviderUtt(KaldiAlignFeatsProviderUtt):
 
         self.fake_utt2spk_map = fake_utt2spk_map
         self.si_sd_training_ratio = si_sd_training_ratio
+        self.si_sd_per_segment = si_sd_per_segment
 
         if not self.fake_utt2spk_map:
+
             assert utt2spk_map is not None
             self.utt2spk_and_idx = {} #keeps {utt:[spk idx]}
             spk2idx = {}
@@ -559,6 +564,38 @@ class KaldiSAT2AlignFeatsProviderUtt(KaldiAlignFeatsProviderUtt):
                     self.utt2spk_and_idx[utt] = [spk, spk2idx[spk]]
 
             log.warning('Found %d distinct speakers in data' % len(spk2idx))
+
+            #now sample SI/SD speaker (which will be kept fixed like this) through
+            #the experiment
+            if self.si_sd_per_segment is False:
+                num_spk = max(spk2idx.values())
+                cut_off = int(self.si_sd_training_ratio * num_spk)
+                si_spk_ids = (numpy.random.permutation(numpy.arange(1, num_spk))[0:cut_off]).tolist()
+                log.warning('Speaker ids set to be treated as independent (%f in total) %s' % (cut_off, si_spk_ids))
+            else:
+                log.warning('Will sample SI/SD data per segment.')
+
+            log.warning("SAT mode: per speaker (%i), per segment (%i)"
+                        % (not self.si_sd_per_segment, self.si_sd_per_segment))
+
+            si_segments, sd_segments = 0, 0
+            for utt, (spk, idx) in self.utt2spk_and_idx.items():
+                if self.si_sd_per_segment is False:
+                    if idx in si_spk_ids:
+                        self.utt2spk_and_idx[utt] = [spk, 0] #0 sets it to SI
+                        si_segments += 1
+                    else:
+                        sd_segments += 1
+                else:
+                    si_or_sd = numpy.random.binomial(1, self.si_sd_training_ratio, 1)
+                    if si_or_sd == 1:
+                        self.utt2spk_and_idx[utt] = [spk, 0] #0 sets it to SI
+                        si_segments += 1
+                    else:
+                        sd_segments += 1
+
+            log.warning("In total, %i segments is treated as SI, leaving %i as SD." % (si_segments, sd_segments))
+
         else:
             log.warning('Speaker labels will be faked, but data specs'
                         'will stay compatible with the expected one for sat interface.')
@@ -572,12 +609,12 @@ class KaldiSAT2AlignFeatsProviderUtt(KaldiAlignFeatsProviderUtt):
         return self
 
     def reset(self):
-        super(KaldiSAT2AlignFeatsProviderUtt, self).reset()
+        super(KaldiSATPerSpkAlignFeatsProviderUtt, self).reset()
 
     def next(self):
 
         try:
-            features, labels = super(KaldiSAT2AlignFeatsProviderUtt, self).next()
+            features, labels = super(KaldiSATPerSpkAlignFeatsProviderUtt, self).next()
         except StopIteration:
             raise StopIteration
 
@@ -590,20 +627,6 @@ class KaldiSAT2AlignFeatsProviderUtt(KaldiAlignFeatsProviderUtt):
                 utt = utt_path.split(" ")[0]
                 spk_idx = self.utt2spk_and_idx[utt][1]
                 spk_idx_mbatch = numpy.ones_like(labels)*spk_idx
-
-                if self.si_sd_training_ratio is not None \
-                        and self.si_sd_training_ratio > 0:
-
-                    assert self.si_sd_training_ratio < 1.0, (
-                        "si_sd_training_ratio expected to be "
-                        "between 0.0 and 1.0, got %f"%self.si_sd_training_ratio
-                    )
-
-                    bsize = spk_idx_mbatch.shape[0]
-                    size = int(bsize*self.si_sd_training_ratio)
-                    indexes = numpy.random.randint(low=0, high=bsize, size=size)
-                    #print 'Indexes are', indexes
-                    spk_idx_mbatch[indexes] = 0 #0 means speaker-independent transform
 
         return features, labels, spk_idx_mbatch
 

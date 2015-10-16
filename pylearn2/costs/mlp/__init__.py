@@ -8,6 +8,7 @@ from pylearn2.costs.mlp.dropout import Dropout
 from pylearn2.space import CompositeSpace, NullSpace
 from pylearn2.utils import safe_izip
 
+
 class Default(Cost):
     """
     The default Cost to use with an MLP.
