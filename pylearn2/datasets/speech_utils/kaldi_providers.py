@@ -9,6 +9,8 @@ import numpy
 import struct
 import random
 import logging
+import cPickle
+import os
 
 from multiprocessing import Process, Queue, Pool
 
@@ -510,6 +512,7 @@ class KaldiSATPerSpkAlignFeatsProviderUtt(KaldiAlignFeatsProviderUtt):
                  feats_dim,
                  targets_dim,
                  utt2spk_map=None,
+                 utt2spk_and_idx_pickle=False,
                  fake_utt2spk_map=False,
                  si_sd_training_ratio=0.1,
                  si_sd_per_segment=False,
@@ -547,8 +550,9 @@ class KaldiSATPerSpkAlignFeatsProviderUtt(KaldiAlignFeatsProviderUtt):
         self.fake_utt2spk_map = fake_utt2spk_map
         self.si_sd_training_ratio = si_sd_training_ratio
         self.si_sd_per_segment = si_sd_per_segment
+        self.utt2spk_and_idx_pickle = utt2spk_and_idx_pickle
 
-        if not self.fake_utt2spk_map:
+        if not self.fake_utt2spk_map and not self.utt2spk_and_idx_pickle:
 
             assert utt2spk_map is not None
             self.utt2spk_and_idx = {} #keeps {utt:[spk idx]}
@@ -596,6 +600,16 @@ class KaldiSATPerSpkAlignFeatsProviderUtt(KaldiAlignFeatsProviderUtt):
 
             log.warning("In total, %i segments is treated as SI, leaving %i as SD." % (si_segments, sd_segments))
 
+            #dump the dictionary, so one can reproduce the exact mapping and use it for sequence training, for exmaple
+            fpath = '%s/utt2spk_and_idx.pkl' % os.environ['PYLEARN2_EXP_NAME']
+            log.warning("Saving the utt2spk_and_idx mapping dictionary in %s." % fpath)
+            with open(fpath, 'w') as f:
+                cPickle.dump(self.utt2spk_and_idx, f)
+
+        elif self.utt2spk_and_idx_pickle:
+            log.warning('Speaker labels will be loaded from the pickle')
+            with open('%s/utt2spk_and_idx.pkl' % os.environ['PYLEARN2_EXP_NAME'], 'r') as f:
+                self.utt2spk_and_idx = cPickle.load(f)
         else:
             log.warning('Speaker labels will be faked, but data specs'
                         'will stay compatible with the expected one for sat interface.')
@@ -623,7 +637,7 @@ class KaldiSATPerSpkAlignFeatsProviderUtt(KaldiAlignFeatsProviderUtt):
             if self.fake_utt2spk_map or self.si_sd_training_ratio == 1.0:
                 spk_idx_mbatch = numpy.zeros_like(labels)
             else:
-                utt_path = self.files_list[self.index-1] #ugly way to do so!
+                utt_path = self.files_list[self.index - 1] #ugly way to do so!
                 utt = utt_path.split(" ")[0]
                 spk_idx = self.utt2spk_and_idx[utt][1]
                 spk_idx_mbatch = numpy.ones_like(labels)*spk_idx
