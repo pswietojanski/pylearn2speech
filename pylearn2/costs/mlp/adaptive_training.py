@@ -55,7 +55,7 @@ class ClusterConcAdaptiveCost(Cost):
         if X.ndim == 2:
             SPK_IDX = X[:,-1]
         elif X.ndim == 4:
-            SPK_IDX = X[:,:,:,-1].reshape((-1,))
+            SPK_IDX = X[:, :, :, -1].reshape((-1,))
         else:
             raise ValueError('Expected to get 2D or 4D ndarray')
 

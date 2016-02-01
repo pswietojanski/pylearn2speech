@@ -143,6 +143,10 @@ class Train(object):
                     self.save()
                 continue_learning =  self.algorithm.continue_learning(self.model)
                 assert continue_learning in [True, False, 0, 1]
+
+                #for prob, scale in self.model.prob_tst:
+                #    print "After update prob is %s while scale is %s" % (prob.get_value(), scale.get_value())
+
                 if not continue_learning:
                     break
 

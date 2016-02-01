@@ -31,8 +31,9 @@ from pylearn2.utils import serial
 from pylearn2.utils import sharedX
 from pylearn2.utils.data_specs import DataSpecsMapping
 from pylearn2.utils.timing import log_timing
+from pylearn2.costs.mlp.dropout import AnnealedDropout
 
-logging.warning('Starting logger for adaptation.py')
+#logging.warning('Starting logger for adaptation.py')
 log = logging.getLogger(__name__)
 
 class SGD(TrainingAlgorithm):
@@ -210,6 +211,21 @@ class SGD(TrainingAlgorithm):
                                          val=self.momentum,
                                          data_specs=(NullSpace(), ''),
                                          dataset=monitoring_dataset)
+
+            if isinstance(self.cost, AnnealedDropout):
+                for key in self.cost.input_probs.keys():
+                    self.monitor.add_channel(name='%s_include_prob'%key,
+                                     ipt=None,
+                                     val=self.cost.input_probs[key],
+                                     data_specs=(NullSpace(), ''),
+                                     dataset=monitoring_dataset)
+
+                    self.monitor.add_channel(name='%s_include_scale'%key,
+                                     ipt=None,
+                                     val=self.cost.input_scales[key],
+                                     data_specs=(NullSpace(), ''),
+                                     dataset=monitoring_dataset)
+
 
         params = list(model.get_params())
         assert len(params) > 0
@@ -478,7 +494,7 @@ class MonitorBasedLRNewBob(TrainExtension):
     """
     
     def __init__(self, scale_by=.5, ramping_threshold=.005, ramping=False, do_ramping=True,
-                 dataset_name=None, channel_name=None, boost_momentum_to=None):
+                 dataset_name=None, channel_name=None, boost_momentum_to=None, min_lr=None):
         """
         :type start_rate: float
         :param start_rate: 
@@ -506,6 +522,7 @@ class MonitorBasedLRNewBob(TrainExtension):
         self.do_ramping = do_ramping
         self.was_ramping = False
         self.boost_momentum_to = boost_momentum_to
+        self.min_lr = min_lr
 
         if channel_name is not None:
             self.channel_name = channel_name
@@ -573,6 +590,10 @@ class MonitorBasedLRNewBob(TrainExtension):
                      %(current_momentum, self.boost_momentum_to))
             self.was_ramping = True
             self.ramping = False #giva a model a chance to adapt to new momentum and lower lr
+
+        if self.min_lr is not None and self.min_lr > rval:
+            log.info("Minimal lr reached, thresholding to %f" % self.min_lr)
+            rval = self.min_lr
 
         lr.set_value(np.cast[lr.dtype](rval))
 
@@ -678,6 +699,7 @@ class AnnealedLearningRate(object):
     def current_learning_rate(self):
         return self._base * min(1, self._anneal_start / self._count)
 
+
 class ExponentialDecay(object):
     """
     This is a callback for the SGD algorithm rather than the Train object.
@@ -705,6 +727,7 @@ class ExponentialDecay(object):
         new_lr = np.cast[config.floatX](new_lr)
         algorithm.learning_rate.set_value(new_lr)
 
+
 class LinearDecay(object):
     """
     This is a callback for the SGD algorithm rather than the Train object.
@@ -730,7 +753,7 @@ class LinearDecay(object):
     def __call__(self, algorithm):
         if self._count == 0:
             self._base_lr = algorithm.learning_rate.get_value()
-            self.step = (self._base_lr - self._base_lr * self.decay_factor) /\
+            self._step = (self._base_lr - self._base_lr * self.decay_factor) /\
                     (self.saturate - self.start + 1)
         self._count += 1
         if self._count >= self.start:
@@ -743,6 +766,7 @@ class LinearDecay(object):
         assert new_lr > 0
         new_lr = np.cast[config.floatX](new_lr)
         algorithm.learning_rate.set_value(new_lr)
+
 
 class MomentumAdjustor(TrainExtension):
     def __init__(self, final_momentum, start, saturate):
@@ -784,6 +808,7 @@ class MomentumAdjustor(TrainExtension):
             alpha = 1.
         return self._init_momentum * (1.-alpha)+alpha*self.final_momentum
 
+
 class OneOverEpoch(TrainExtension):
     """
     Scales the learning rate like one over # epochs
@@ -824,6 +849,7 @@ class OneOverEpoch(TrainExtension):
         lr = self._init_lr * scale
         clipped = max(self.min_lr, lr)
         return clipped
+
 
 class LinearDecayOverEpoch(TrainExtension):
     """
@@ -870,7 +896,7 @@ class LinearDecayOverEpoch(TrainExtension):
 
 class LinearDropoutDecayOverEpoch(TrainExtension):
     """
-    Scales the dropout rate linearly on each epochs
+    Scales the dropout rate linearly on each epoch
     """
     def __init__(self, start, saturate, decay_factor):
         """
@@ -891,24 +917,44 @@ class LinearDropoutDecayOverEpoch(TrainExtension):
         assert saturate >= start
 
     def on_monitor(self, model, dataset, algorithm):
-        if not self._initialized:
-            self._init_lr = algorithm.learning_rate.get_value()
-            self._step = (self._init_lr - self._init_lr * self.decay_factor) /\
-                    (self.saturate - self.start + 1)
-            self._initialized = True
-        self._count += 1
-        algorithm.learning_rate.set_value( np.cast[config.floatX](self.current_lr()))
 
-    def current_lr(self):
+        assert isinstance(algorithm.cost, AnnealedDropout), (
+            "Expected cost of type AnnealedDropout, got %s" % type(algorithm.cost)
+        )
+
+        if not self._initialized:
+            self._input_probs_init = {}
+            self._init_scales_init = {}
+            self._steps = {}
+            for key in algorithm.cost.input_probs.keys():
+                self._input_probs_init[key] = algorithm.cost.input_probs[key].get_value()
+                self._init_scales_init[key] = algorithm.cost.input_scales[key].get_value()
+                self._steps[key] = (self._input_probs_init[key] + self._input_probs_init[key] * self.decay_factor) /\
+                    (self.saturate - self.start + 1)
+                self._initialized = True
+
+        self._count += 1
+
+        for key in self._input_probs_init.keys():
+            prob, scale = self.current_dp_rate(key)
+            #print "Setting prob and scale of %s to %f and %f" %(key, prob, scale)
+            algorithm.cost.input_probs[key].set_value(np.cast[config.floatX](prob))
+            algorithm.cost.input_scales[key].set_value(np.cast[config.floatX](scale))
+            #model.input_include_probs[key].set_value(np.cast[config.floatX](prob))
+            #model.input_scales[key].set_value(np.cast[config.floatX](scale))
+
+    def current_dp_rate(self, key):
+        prob = self._input_probs_init[key]
         if self._count >= self.start:
             if self._count < self.saturate:
-                new_lr = self._init_lr - self._step * (self._count - self.start + 1)
+                new_prob = prob + self._steps[key] * (self._count - self.start + 1)
             else:
-                new_lr = self._init_lr * self.decay_factor
+                new_prob = prob + (self.saturate - self.start + 1)*self.decay_factor
         else:
-            new_lr = self._init_lr
-        assert new_lr > 0
-        return new_lr
+            new_prob = prob
+        assert new_prob > 0
+        return new_prob, 1.0/new_prob
+
 
 class _PolyakWorker(object):
     """

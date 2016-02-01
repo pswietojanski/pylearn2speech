@@ -24,6 +24,7 @@ from theano.sandbox.rng_mrg import MRG_RandomStreams
 from theano.sandbox.cuda.dnn import dnn_available, dnn_pool
 from theano.tensor.signal.downsample import max_pool_2d
 from theano.gradient import consider_constant
+from theano import function, printing
 import theano.tensor as T
 
 from pylearn2.costs.mlp import Default
@@ -231,6 +232,8 @@ class MLP(Layer):
             if x is None:
                 return None
             return 1. / x
+
+        #self.prob_tst = []
 
     def setup_rng(self):
         self.rng = np.random.RandomState(self.seed)
@@ -646,7 +649,7 @@ class MLP(Layer):
             else:
                 scale = default_input_scale
 
-            state_below = self.apply_dropout(
+            state_below = self.apply_dropout_annealed(
                 state=state_below,
                 include_prob=include_prob,
                 theano_rng=theano_rng,
@@ -659,7 +662,7 @@ class MLP(Layer):
 
         return state_below
 
-    def fprop(self, state_below, return_all = False):
+    def fprop(self, state_below, return_all=False):
 
         rval = self.layers[0].fprop(state_below)
 
@@ -698,6 +701,50 @@ class MLP(Layer):
         # A method to format the mask (or any other values) as
         # the given symbolic type should be added to the Spaces
         # interface.
+        if per_example:
+            mask = theano_rng.binomial(p=include_prob, size=state.shape,
+                                       dtype=state.dtype)
+        else:
+            batch = input_space.get_origin_batch(1)
+            mask = theano_rng.binomial(p=include_prob, size=batch.shape,
+                                       dtype=state.dtype)
+            rebroadcast = T.Rebroadcast(*zip(xrange(batch.ndim),
+                                             [s == 1 for s in batch.shape]))
+            mask = rebroadcast(mask)
+        if mask_value == 0:
+            return state * mask * scale
+        else:
+            return T.switch(mask, state * scale, mask_value)
+
+    def apply_dropout_annealed(self, state, include_prob, scale, theano_rng,
+                      input_space, mask_value=0, per_example=True):
+
+        """
+        Parameters
+        ----------
+        ...
+
+        per_example : bool, optional
+            Sample a different mask value for every example in
+            a batch. Default is `True`. If `False`, sample one
+            mask per mini-batch.
+        """
+        if include_prob in [None, 1.0, 1]:
+            return state
+
+        assert scale is not None
+        if isinstance(state, tuple):
+            return tuple(self.apply_dropout_annealed(substate, include_prob,
+                                            scale, theano_rng, mask_value)
+                         for substate in state)
+        # TODO: all of this assumes that if it's not a tuple, it's
+        # a dense tensor. It hasn't been tested with sparse types.
+        # A method to format the mask (or any other values) as
+        # the given symbolic type should be added to the Spaces
+        # interface.
+
+        #self.prob_tst.append((include_prob, scale))
+
         if per_example:
             mask = theano_rng.binomial(p=include_prob, size=state.shape,
                                        dtype=state.dtype)
@@ -2254,8 +2301,8 @@ class ConvSigmoid(Layer):
         self.b = sharedX(self.detector_space.get_origin() + self.init_bias)
         self.b.name = self.layer_name+'_b'
 
-        print 'Input shape: ', self.input_space.shape
-        print 'Detector space: ', self.detector_space.shape
+        #print 'Input shape: ', self.input_space.shape
+        #print 'Detector space: ', self.detector_space.shape
         
         #log.info('Input shape: ', self.input_space.shape)
         #log.info('Detector space: ', self.detector_space.shape)
@@ -2279,7 +2326,7 @@ class ConvSigmoid(Layer):
         self.output_space = Conv2DSpace(shape=[dummy_p.shape[2], dummy_p.shape[3]],
                 num_channels = self.output_channels, axes = ('b', 'c', 0, 1) )
 
-        print 'Output space: ', self.output_space.shape
+        #print 'Output space: ', self.output_space.shape
 
 
     def censor_updates(self, updates):
@@ -3423,6 +3470,7 @@ class MaxoutConv1DStrided(Layer):
         if self.cross_channel_pooling == "post":
             # the p contains at this stage self.output_channels feature maps per input channel
             # here we maxpool these maps cross-channel
+
             p = max_pool_channels_1D(p, self.input_space.num_channels, self.output_space.num_channels)
                 
         self.output_space.validate(p)

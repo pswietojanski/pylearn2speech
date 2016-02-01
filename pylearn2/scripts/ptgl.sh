@@ -82,6 +82,7 @@ if [ ! -z "$CNN_CONF" ]; then
 . ./$CNN_CONF
 fi
 
+
 if [ "$NUMLIB" == "atlas" ]; then
   NUMFLAGS="blas.ldflags=$ATLASF"
 elif [ "$NUMLIB" == "mkl" ]; then
@@ -130,18 +131,18 @@ if [ $OMP_NUM_THREADS -gt 1 ]; then
   USE_OPENMP=True
 fi
 
+if [ $PROFILE == "True" ]; then
+  export CUDA_LAUNCH_BLOCKING=1
+fi
+
 THEANO_FLAGS="device=$DEVICE, openmp=$USE_OPENMP, floatX=float32, force_device=True, print_active_device=False, nvcc.fastmath=True, exception_verbosity=high, profile=$PROFILE, allow_gc=$ASYNC"
 THEANO_FLAGS="$THEANO_FLAGS, $NUMFLAGS"
 #THEANO_FLAGS="$THEANO_FLAGS, optimizer_including=conv_fft_valid"
 
 if [ $USE_CUDNN -eq 1 ]; then
-  THEANO_FLAGS="$THEANO_FLAGS, optimizer_including=cudnn"
+  THEANO_FLAGS="$THEANO_FLAGS, optimizer_including=cudnn, dnn.conv.algo_fwd=guess_once, dnn.conv.algo_bwd=guess_once"
 else
   THEANO_FLAGS="$THEANO_FLAGS, optimizer_excluding=conv_dnn"
-fi
-
-if [ "$MODE" == "PROFILE_MODE" ]; then
-  export CUDA_LAUNCH_BLOCKING=1
 fi
 
 # we do some special assumptions on the grid - i)compiling in tmp, and ii) spearate compilation dir per task

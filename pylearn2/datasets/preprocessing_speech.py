@@ -87,7 +87,7 @@ class SpliceFrames(OnlinePreprocessor):
 
             rval_x = rval
         else:
-            raise Exception('SpliceFrames: expected tensor of length 2 or 4, got %i.'%len(x.shape))
+            raise Exception('SpliceFrames: expected tensor of length 2 or 4, got %i.'%x.ndim)
 
         data[0] = rval_x
 
@@ -148,6 +148,37 @@ class CMVNNormaliser(OnlinePreprocessor):
         return NotImplementedError('This is abstract class which did not implement data_specs')
 
 
+class KaldiNormaliser(OnlinePreprocessor):
+
+    def __init__(self,
+                 feat_trans=None,
+                 shift_name='g0_shift',
+                 scale_name='g1_scale',
+                 act_on_sources='features'):
+
+        super(KaldiNormaliser, self).__init__(act_on_sources)
+
+        from pylearn2.utils.serial import kaldi_to_pytables
+        params = kaldi_to_pytables(feat_trans)
+        assert shift_name in params.keys() and scale_name in params.keys(), (
+            "Keys %s and %s not found in %s" % (shift_name, scale_name, params.keys())
+        )
+        self.shift = params[shift_name]
+        self.scale = params[scale_name]
+
+    def apply(self, xy):
+        data = list(xy)
+        x = data[0]
+        data[0] = (x + self.shift) * self.scale
+        return tuple(data)
+
+    def get_pre_data_spec(self):
+        return NotImplementedError('This is abstract class which did not implement data_specs')
+
+    def get_post_data_spec(self):
+        return NotImplementedError('This is abstract class which did not implement data_specs')
+
+
 class ReshapeAudioChannels(OnlinePreprocessor):
     """
     Should be called *before* SpliceFeats so splicing will be performed for each channel separately
@@ -165,7 +196,7 @@ class ReshapeAudioChannels(OnlinePreprocessor):
         x, y = xy
 
         if self._num_input_channels == 1:
-            return (x, y)
+            return x, y
 
         #print 'ReshapeAudioChannels x shape', x.shape
 
@@ -176,11 +207,11 @@ class ReshapeAudioChannels(OnlinePreprocessor):
         feats_in_channel = tot_feats_dim/self._num_input_channels
         rval = numpy.zeros((batch_size, self._num_input_channels, 1, feats_in_channel), dtype=theano.config.floatX)
         for i in xrange(self._num_input_channels):
-            rval[:,i,0,:] = x[:,i*feats_in_channel:(i+1)*feats_in_channel]
+            rval[:, i, 0, :] = x[:, i*feats_in_channel:(i+1)*feats_in_channel]
         
         #print 'ReshapeAudioChannels rval shape', rval.shape
         
-        return (rval, y)
+        return rval, y
 
     def get_pre_data_spec(self):
         return NotImplementedError('This is abstract class which did not implement data_specs')
@@ -227,7 +258,7 @@ class ReorderByBands(OnlinePreprocessor):
     def __init__(self, num_bands,
                  context_window,
                  act_on_sources='features',
-                 axes=('b','c',0,1),
+                 axes=('b', 'c', 0, 1),
                  tied_deltas=False,
                  tied_channels=True,
                  reshape_stride_for_1D=-1):
@@ -273,7 +304,7 @@ class ReorderByBands(OnlinePreprocessor):
         #print 'Input shape %s '%(x.shape,)
         #print 'XX shape is %s '%(xx.shape,)
         
-        #reorder s,d and dd according to bands across the whole con qtext window 
+        #reorder s,d and dd according to bands across the whole context window
         #i.e. s0,d0,dd0_{t:T}s1,d1,dd1_{t:T},...,sb,db,ddb_{t:T} where b = 0..num_bands
         rval = numpy.zeros((batch_size, num_channels, 1, dimension), dtype=theano.config.floatX)
         feats_in_band = num_deltas*self.context_window

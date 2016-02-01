@@ -260,6 +260,7 @@ class LpFixedPooler(Layer):
     def foo(self, state_below):
         raise NotImplementedError();
 
+
 class LpPooler(Layer):
     """
     This code implements the functionality proposed in:
@@ -490,7 +491,7 @@ class LpPooler(Layer):
             self.min_zero = False
         
         if self.reparam_p == 'softplus':
-            pr  = 1+T.log(1+T.exp(self.p))
+            pr = 1+T.log(1+T.exp(self.p))
         elif self.reparam_p == 'rect':
             pr = T.maximum(1., self.p)
         else:
@@ -500,7 +501,7 @@ class LpPooler(Layer):
         
         z_act = z  
         if self.center_bias:
-            z_act = z_act - self.c.dimshuffle('x',0)
+            z_act = z_act - self.c.dimshuffle('x', 0)
             
         if self.min_zero:
             z_act = T.maximum(z_act, 0)
@@ -518,10 +519,10 @@ class LpPooler(Layer):
                 p = p + cur
         
         if self.pool_normalisation:   
-            p = p*(1.0/self.pool_size)
+            p *= 1.0/self.pool_size
         
         p = T.maximum(p, epsilon) # fix to gradients w.r.t x in case sum_i x_i**p is close to or 0         
-        p = p**(1.0/pr)
+        p **= 1.0 / pr
         
         self.post_pool_normalisation = False   
         if self.post_pool_normalisation:   
@@ -1904,7 +1905,8 @@ class MultiplicativeAdapter(Layer):
                        irange = None,
                        u_lr_scale = None,
                        constraint = 'sigmoid',
-                       decoding = False):
+                       decoding = False,
+                       learn_shift = False):
         """
             layer_name: a layer name that will be
             irange: if specified, the initial multipliers will be randomly
@@ -1927,18 +1929,31 @@ class MultiplicativeAdapter(Layer):
         if not hasattr(self, 'u_lr_scale'):
             self.u_lr_scale = None
 
+        if not hasattr(self, 's_lr_scale'):
+            self.s_lr_scale = None
+
         if self.u_lr_scale is not None:
             rval[self.u] = self.u_lr_scale
+
+        if self.s_lr_scale is not None:
+            rval[self.s] = self.s_lr_scale
 
         return rval
 
     def get_monitoring_channels(self):
 
-        return OrderedDict([
-                            ('u_min'  , self.u.min()),
-                            ('u_mean' , self.u.mean()),
-                            ('u_max'  , self.u.max()),
+        rval = OrderedDict([
+                            ('u_min', self.u.min()),
+                            ('u_mean', self.u.mean()),
+                            ('u_max', self.u.max()),
                             ])
+
+        if self.learn_shift is True:
+            rval['s_min'] = self.s.min()
+            rval['s_mean'] = self.s.mean()
+            rval['s_max'] = self.s.max()
+
+        return rval
 
     def set_input_space(self, space):
 
@@ -1964,6 +1979,10 @@ class MultiplicativeAdapter(Layer):
                 offset = 1.0
             u = np.zeros((self.input_dim,), dtype=config.floatX) + offset
 
+        if self.learn_shift is True:
+            s = np.zeros((self.input_dim,), dtype=config.floatX)
+            self.s = sharedX(s, name=self.layer_name+'_s')
+
         self.u = sharedX(u, name=self.layer_name+'_u')
 
     def get_weights_topo(self):
@@ -1980,6 +1999,9 @@ class MultiplicativeAdapter(Layer):
 
         rval = []
         rval.append(self.u)
+
+        if self.learn_shift is True:
+            rval.append(self.s)
 
         return rval
 
@@ -2002,7 +2024,11 @@ class MultiplicativeAdapter(Layer):
         else:
             amp = self.u
 
-        a = z*amp
+        shift = 0
+        if self.learn_shift is True:
+            shift = self.s
+
+        a = z*amp + shift
 
         a.name = "_a_"
 
@@ -2144,7 +2170,7 @@ class MultiplicativeSATAdapter(Layer):
                        irange=None,
                        u_lr_scale=None,
                        constraint='sigmoid',
-                       si_fprop_mode='unit_gain',
+                       si_fprop_mode=None,
                        decoding=False):
         """
             layer_name: a layer name that will be
@@ -2269,7 +2295,12 @@ class MultiplicativeSATAdapter(Layer):
         if self.requires_reformat:
             state_below = self.input_space.format_as(state_below, self.desired_space)
 
+        #if not T.all(spk_idx): #hack to make dev fprop faster?
+        #    s = self.u[0, :]
+        #else:
+        #    s = self.u[T.cast(spk_idx, dtype='int32'), :]
         s = self.u[T.cast(spk_idx, dtype='int32'), :]
+
         if self.constraint == "sigmoid":
             amp = 2*T.nnet.sigmoid(s)
         elif self.constraint == "exp":
@@ -2870,6 +2901,142 @@ class FactoredMultiplicativeAdapter(Layer):
         amp = 2*T.nnet.sigmoid(self.u)
 
         a = z*amp
+        a.name = "_a_"
+
+        return a
+
+
+class AttentivePooler(Layer):
+
+    def __init__(self, layer_name,
+                       irange = None,
+                       u_lr_scale = None,
+                       constraint = 'sigmoid',
+                       decoding = False,
+                       learn_shift = False):
+        """
+            layer_name: a layer name that will be
+            irange: if specified, the initial multipliers will be randomly
+                    selected from U(-irange, irange)
+            u_lr_scale: learning rate scaling for u w.r.t the main learning
+                    rate
+            decoding: once the model is trained, u is fixed as such there is
+                    no need to evaluate simgoid(u) for each example
+        """
+
+        assert constraint in ['sigmoid', 'exp', 'relu', 'none']
+
+        self.__dict__.update(locals())
+        del self.self
+
+    def get_lr_scalers(self):
+
+        rval = OrderedDict()
+
+        if not hasattr(self, 'u_lr_scale'):
+            self.u_lr_scale = None
+
+        if not hasattr(self, 's_lr_scale'):
+            self.s_lr_scale = None
+
+        if self.u_lr_scale is not None:
+            rval[self.u] = self.u_lr_scale
+
+        if self.s_lr_scale is not None:
+            rval[self.s] = self.s_lr_scale
+
+        return rval
+
+    def get_monitoring_channels(self):
+
+        rval = OrderedDict([
+                            ('u_min', self.u.min()),
+                            ('u_mean', self.u.mean()),
+                            ('u_max', self.u.max()),
+                            ])
+
+        if self.learn_shift is True:
+            rval['s_min'] = self.s.min()
+            rval['s_mean'] = self.s.mean()
+            rval['s_max'] = self.s.max()
+
+        return rval
+
+    def set_input_space(self, space):
+
+        self.input_space = space
+
+        if isinstance(space, VectorSpace):
+            self.requires_reformat = False
+            self.input_dim = space.dim
+        else:
+            self.requires_reformat = True
+            self.input_dim = space.get_total_dimension()
+            self.desired_space = VectorSpace(self.input_dim)
+
+        self.output_space = VectorSpace(self.input_dim)
+
+        if self.irange is not None:
+            u = np.random.uniform(-self.irange, +self.iragne,
+                                    (self.input_dim,), dtype=config.floatX)
+        else:
+            if self.constraint in ['sigmoid', 'exp']:
+                offset = 0.0
+            else:
+                offset = 1.0
+            u = np.zeros((self.input_dim,), dtype=config.floatX) + offset
+
+        if self.learn_shift is True:
+            s = np.zeros((self.input_dim,), dtype=config.floatX)
+            self.s = sharedX(s, name=self.layer_name+'_s')
+
+        self.u = sharedX(u, name=self.layer_name+'_u')
+
+    def get_weights_topo(self):
+        raise NotImplementedError()
+
+    def get_weights(self):
+        raise NotImplementedError()
+
+    def censor_updates(self, updates):
+        return OrderedDict()
+
+    def get_params(self):
+        assert self.u.name is not None
+
+        rval = []
+        rval.append(self.u)
+
+        if self.learn_shift is True:
+            rval.append(self.s)
+
+        return rval
+
+    def fprop(self, state_below):
+
+        self.input_space.validate(state_below)
+
+        if self.requires_reformat:
+            state_below = self.input_space.format_as(state_below, self.desired_space)
+
+        self.output_space.validate(state_below)
+
+        z = state_below
+        if self.constraint == "sigmoid":
+            amp = 2*T.nnet.sigmoid(self.u)
+        elif self.constraint == "exp":
+            amp = T.exp(self.u)
+        elif self.constraint == "relu":
+            amp = T.maximum(0.0, self.u)
+        else:
+            amp = self.u
+
+        shift = 0
+        if self.learn_shift is True:
+            shift = self.s
+
+        a = z*amp + shift
+
         a.name = "_a_"
 
         return a

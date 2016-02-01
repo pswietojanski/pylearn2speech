@@ -25,11 +25,11 @@ class Conv1D(OrigConv2D):
             filters,
             batch_size,
             input_space,
-            output_axes = ('b','c',0,1),
-        subsample = (1, 1), border_mode = 'valid',
-        filters_shape = None, message = '',
-        tied_input_channels = False,
-        channelwise_conv = False):
+            output_axes=('b','c',0,1),
+        subsample=(1, 1), border_mode='valid',
+        filters_shape=None, message='',
+        tied_input_channels=False,
+        channelwise_conv=False):
 
         self.input_space = input_space
         self.output_axes = output_axes
@@ -111,12 +111,12 @@ class Conv1D(OrigConv2D):
             #output in a 4D tensor of shape (batch_size, num_filters*num_inp_channels, 1, cols)
             #this allows to later on, for example, maxpool the channel-specific featrue maps channels
             rval = T.concatenate([
-                                    conv2d(r_x[:,i,:,:].dimshuffle(0,'x',1,2),
-                                    r_filters[:,i,:,:].dimshuffle(0,'x',1,2),
-                                    image_shape = elem_x_shape,
-                                    filter_shape = elem_filters_shape,
-                                    subsample = (1,1),
-                                    border_mode = self._border_mode)
+                                    conv2d(r_x[:, i, :, :].dimshuffle(0, 'x', 1, 2),
+                                    r_filters[:, i, :, :].dimshuffle(0, 'x', 1, 2),
+                                    image_shape=elem_x_shape,
+                                    filter_shape=elem_filters_shape,
+                                    subsample= (1,1),
+                                    border_mode=self._border_mode)
                                     for i in xrange(r_filters_shape[1])
                                  ], axis=1)
         else:
@@ -131,7 +131,7 @@ class Conv1D(OrigConv2D):
         if reshape_for_strided: #when reshaping for conv1D get rid of the last dimension, and reshape to get a desired conv2d 4D rval
             rval = rval[:,:,:,0]
             #rval = rval.reshape((self._img_shape[0], self._filters_shape[0], 1, -1)) #(mb, c, 1, convbands)
-            rval = rval.dimshuffle(0,1,'x',2) #make it compatible with (b,c,0,1) where 0 topological axis has always 1 dimension
+            rval = rval.dimshuffle(0, 1, 'x', 2) #make it compatible with (b,c,0,1) where 0 topological axis has always 1 dimension
 
         # Format the output based on the output space
         axes = self.output_axes

@@ -4,6 +4,7 @@ from pylearn2.train_extensions import TrainExtension
 import theano
 import theano.tensor as T
 from pylearn2.utils import serial
+import logging
 
 
 class KeepBestParams(TrainExtension):
@@ -198,3 +199,45 @@ class MonitorBasedSaveBestPyTables(TrainExtension):
              params = model.get_params()
 
          serial.save_params_to_pytables(self.save_path, params, on_overwrite='ignore')
+
+
+class MonitorBasedBestParamsKeeper(TrainExtension):
+    """
+    A callback that saves a copy of the model every time it achieves
+    a new minimal value of a monitoring channel.
+    """
+    def __init__(self, channel_name, higher_is_better=False):
+        """
+        Parameters
+        ----------
+        channel_name: the name of the channel we want to minimize
+        save_path: the path to save the best model to
+        save_freezed: when True, the model will dump also the params that could be potentially freezed
+        param_keys: keys of the parameters which supposed to be saved
+        """
+
+        self.__dict__.update(locals())
+        del self.self
+        if higher_is_better:
+            self.coeff = -1.
+        else:
+            self.coeff = 1.
+        self.best_cost = np.inf
+        self.best_params = None
+
+    def on_monitor(self, model, dataset, algorithm):
+
+        monitor = model.monitor
+        channels = monitor.channels
+        channel = channels[self.channel_name]
+        val_record = channel.val_record
+        new_cost = self.coeff * val_record[-1]
+
+        if new_cost < self.best_cost:
+            self.best_cost = new_cost
+            self.best_params = model.get_param_values()
+        else:
+            if self.best_params is not None:
+                print 'MonitorBasedBestParamsKeeper: params got worse, swapped them ' \
+                      'with the one with best cost (%f)' % self.best_cost
+                model.set_param_values(self.best_params)

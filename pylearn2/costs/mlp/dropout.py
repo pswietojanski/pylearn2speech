@@ -3,6 +3,8 @@ __copyright__ = "Copyright 2013, Universite de Montreal"
 
 from pylearn2.costs.cost import Cost
 from pylearn2.space import CompositeSpace
+from pylearn2.utils import sharedX
+from collections import OrderedDict
 
 class Dropout(Cost):
     """
@@ -77,8 +79,8 @@ class AnnealedDropout(Cost):
 
     supervised = True
 
-    def __init__(self, default_input_include_prob=.5, input_include_probs=None,
-            default_input_scale=2., input_scales=None, per_example=True):
+    def __init__(self, default_input_include_prob=1.0, input_include_probs=None,
+            default_input_scale=1.0, input_scales=None, per_example=True):
         """
         During training, each input to each layer is randomly included or excluded
         for each example. The probability of inclusion is independent for each input
@@ -97,6 +99,17 @@ class AnnealedDropout(Cost):
             input_scales = {}
 
         self.__dict__.update(locals())
+
+        self.input_probs = {}
+        self.input_scales = {}
+
+        for key, prob in input_include_probs.iteritems():
+            self.input_probs[key] = sharedX(prob, '%s_input_include_prob'%key)
+            if key in input_scales:
+                self.input_scales[key] = sharedX(input_scales[key], '%s_input_include_prob'%key)
+            else:
+                self.input_scales[key] = sharedX(1.0/prob, '%s_input_include_prob'%key)
+
         del self.self
 
     def expr(self, model, data, ** kwargs):
@@ -106,7 +119,7 @@ class AnnealedDropout(Cost):
         Y_hat = model.annealed_dropout_fprop(
             X,
             default_input_include_prob=self.default_input_include_prob,
-            input_include_probs=self.input_include_probs,
+            input_include_probs=self.input_probs,
             default_input_scale=self.default_input_scale,
             input_scales=self.input_scales,
             per_example=self.per_example
@@ -136,4 +149,10 @@ class AnnealedDropout(Cost):
 
         """
         self.get_data_specs(model)[0].validate(data)
-        return OrderedDict()
+        rval = OrderedDict()
+
+        for key in self.input_probs.keys():
+            rval['%s_prob'%key] = self.input_probs[key]
+            rval['%s_scale'%key] = self.input_scales[key]
+
+        return rval

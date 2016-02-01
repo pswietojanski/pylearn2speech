@@ -2184,37 +2184,7 @@ class MaxoutLocalC01B(Layer):
 
         return rval
 
-class GaussianPooler(Layer):
-    """
-    
-    """
-    def __init__(self,
-                 num_channels,
-                 num_pieces,
-                 kernel_shape,
-                 layer_name,
-                 pool_shape=None,
-                 pool_stride=None,
-                 irange = None,
-                 init_bias = 0.,
-                 W_lr_scale = None,
-                 b_lr_scale = None,
-                 pad = 0,
-                 fix_pool_shape = False,
-                 fix_pool_stride = False,
-                 fix_kernel_shape = False,
-                 partial_sum = 1,
-                 tied_b = False,
-                 max_filter_norm = None,
-                 input_normalization = None,
-                 detector_normalization = None,
-                 min_zero = False,
-                 output_normalization = None,
-                 input_groups = 1,
-                 kernel_stride=(1, 1)):
-        pass
-        
-        
+
 class MaxoutBC01Strided(Layer):
     """
     Maxout units arranged in a convolutional layer, with

@@ -22,14 +22,18 @@ from pylearn2.space import CompositeSpace, Conv2DSpace, VectorSpace
 log = logging.getLogger(__name__)
 
 
-def read_kaldi_matrix(buffer):
-    descr = struct.unpack('<xcccc', buffer.read(5))  # read 0B{F,D}{V,M,C}[space], function tested for 0BFM types only
+def read_kaldi_matrix(buffer, skip_binary_preamble=False):
 
-    binary_mode = descr[0]
-    repr_type = descr[1]
-    cont_type = descr[2]
-
-    assert binary_mode == "B"
+    if skip_binary_preamble:
+        descr = struct.unpack('<ccc', buffer.read(5))  # read 0B{F,D}{V,M,C}[space], function tested for 0BFM types only
+        repr_type = descr[0]
+        cont_type = descr[1]
+    else:
+        descr = struct.unpack('<xcccc', buffer.read(5))  # read 0B{F,D}{V,M,C}[space], function tested for 0BFM types only
+        binary_mode = descr[0]
+        repr_type = descr[1]
+        cont_type = descr[2]
+        assert binary_mode == "B"
 
     if (repr_type == 'F'):
         dtype = numpy.dtype(numpy.float32)
@@ -281,6 +285,11 @@ class KaldiAlignFeatsProviderUtt(KaldiFeatsProviderUtt):
         assert len(self.align_info) == len(self.files_info)
         self._num_examples = self._recount_examples(self.align_info)
 
+        assert self._num_examples > 0, (
+            "Did not found matched alignments for the given feat (%s) "
+            "and align files (%s)" % (feats_scp, aligns_scp)
+        )
+
         log.warning("Loaded %i feature files and %i associated alignments" \
                     % (len(files_info), len(align_info)))
         log.warning("The intersection of those give in total %i "
@@ -349,7 +358,7 @@ class KaldiAlignFeatsProviderUtt(KaldiFeatsProviderUtt):
         self.index += 1
 
         if features is None:
-            return (None, None), utt_path
+            return None, None
 
         if utt_id in self.align_info:
             labels = self.align_info[utt_id]
@@ -741,7 +750,7 @@ class KaldiSeqAlignFeatsProviderUtt(KaldiAlignFeatsProviderUtt):
         self.list_size = len(self.files_list)
 
         log.warning("The intersection of features, targets and den-lattices results in %i "
-                    "data-points (in %i utterances, %i skipped)."
+                    "data-points (%i utterances, %i skipped)."
                     % (self._num_examples, self.list_size, old_list_size-self.list_size))
 
         feats_space = VectorSpace(dim=self.feats_dim)
@@ -1005,6 +1014,7 @@ class CICDKaldiAlignFeatsProviderUtt(KaldiFeatsProviderUtt):
             self.index += 1
             return none_tuple
 
+        features = None
         try:
             features = read_ark_entry_from_archive(utt_path)
         except Exception as e:
@@ -1068,9 +1078,9 @@ class MultiStreamCall(Process):
         self.out_queue = out_queue
 
     def run(self):
-        # print 'Starting a %s'%self.thread_id
+        #print 'Starting a %s'%self.thread_id
         scp_entry = self.in_queue.get(block=True)
-        while (scp_entry is not None):
+        while scp_entry is not None:
             try:
                 features = read_ark_entry_from_archive(scp_entry)
                 self.out_queue.put(features)
@@ -1078,25 +1088,40 @@ class MultiStreamCall(Process):
                 print e
                 self.out_queue.put(None)
             scp_entry = self.in_queue.get(block=True)
-            # print 'Finishing %s'%self.thread_id
+            #print 'Finishing %s'%self.thread_id
 
 
 class MultiStreamKaldiAlignFeatsProviderUtt(KaldiAlignFeatsProviderUtt):
-    def __init__(self, files_paths_lists, align_file, template_shell_command, randomize=False,
-                 subset=-1, mapped=False, concatenated=True):
+    def __init__(self,
+                 file_scps,
+                 align_scp,
+                 feats_dim,
+                 targets_dim,
+                 randomize=False,
+                 max_utt=-1,
+                 frame_shift=10,
+                 mapped=False,
+                 concatenated=True):
 
-        assert files_paths_lists != None and len(files_paths_lists) > 1
+        assert file_scps is not None and len(file_scps) > 1
 
         try:
-            super(MultiStreamKaldiAlignFeatsProviderUtt, self).__init__(files_paths_lists[0], align_file,
-                                                                        template_shell_command,
-                                                                        randomize=False, max_utt=subset,
-                                                                        mapped=mapped)
+
+            super(MultiStreamKaldiAlignFeatsProviderUtt, self)\
+                .__init__(feats_scp=file_scps[0],
+                          aligns_scp=align_scp,
+                          feats_dim=feats_dim,
+                          targets_dim=targets_dim,
+                          template_shell_command=None,
+                          randomize=False,
+                          frame_shift=frame_shift,
+                          max_utt=max_utt,
+                          mapped=mapped)
 
             self.concatenated = concatenated
             utt_paths = []
             # load the lists splitted into UTTIDs (keys) and PATHs into separate dictionaries
-            for f in files_paths_lists:
+            for f in file_scps:
                 dp, dpd = ListDataProvider(f), {}
                 for line in dp.files_list:
                     [utt, path] = line.split(' ', 1)
@@ -1132,6 +1157,11 @@ class MultiStreamKaldiAlignFeatsProviderUtt(KaldiAlignFeatsProviderUtt):
                     MultiStreamCall('Stream-%i' % s, self.stream_inqueues[s], self.stream_outqueues[s]))
                 self.stream_threads[s].start()
 
+            if self.concatenated:
+                feats_space = VectorSpace(dim=self.feats_dim*self.num_streams)
+                targets_space = VectorSpace(dim=self.targets_dim)
+                self.data_spec = (CompositeSpace((feats_space, targets_space)), ('features', 'targets'))
+
         except IOError as e:
             raise e
 
@@ -1155,7 +1185,7 @@ class MultiStreamKaldiAlignFeatsProviderUtt(KaldiAlignFeatsProviderUtt):
             self.stream_threads[s].start()
 
     def next(self):
-        if ((self.index >= len(self.utt_infos)) or (self.max_utt > 0 and self.index >= self.max_utt)):
+        if self.index >= len(self.utt_infos) or (0 < self.max_utt <= self.index):
             for s in xrange(0, self.num_streams):
                 self.stream_inqueues[s].put(None)
             raise StopIteration
@@ -1169,7 +1199,7 @@ class MultiStreamKaldiAlignFeatsProviderUtt(KaldiAlignFeatsProviderUtt):
             labels = self.align_info[utt_id]
         else:
             # print 'No alignments found for utterannce: %s\n\tIndex %d: %d alignments; %d feats'%(utt_id, self.index, len(self.align_info), len(self.files_list))
-            return (features, labels), utt_id
+            return features, labels
 
         utt_paths = self.utt_infos[utt_id]
         feats_list = [None] * self.num_streams
@@ -1180,27 +1210,24 @@ class MultiStreamKaldiAlignFeatsProviderUtt(KaldiAlignFeatsProviderUtt):
             for s in xrange(0, self.num_streams):  # this loop and queue secures proper synchronisation
                 feats_list[s] = self.stream_outqueues[s].get(block=True)
         except Exception as e:
-            print 'Something failed: ', e, buffer_tuple[1]  # , align_tuple[1]
+            print 'Something failed for %s: ' % utt_paths[0], e # , align_tuple[1]
 
         for i in xrange(0, len(feats_list)):
-            if (feats_list[i] is None):
-                return (None, None), utt_id
+            if feats_list[i] is None:
+                return None, None
 
         for feats in feats_list:
             if feats.shape[0] != labels.shape[0]:
                 print 'Alignments for %s have %i frames while the utt has %i. Skipping' % \
-                      (utt_path, labels.shape[0], features.shape[0])
-                return (feats_list, None), utt_id
-
-        if self.mapped == True:
-            labels = labels - 1
+                      (utt_paths[0], labels.shape[0], features.shape[0])
+                return feats_list, None
 
         if self.concatenated is False:
-            return (feats_list, labels), utt_id
+            return feats_list, labels
 
         features = numpy.concatenate(feats_list, axis=1)  # concatenate the channels to make one big vector
 
-        return (features, labels)
+        return features, labels
 
     def get_data_specs(self):
-        raise NotImplementedError(str(type(self)) + " does not implement get_data_sepcs.")
+        return self.data_spec

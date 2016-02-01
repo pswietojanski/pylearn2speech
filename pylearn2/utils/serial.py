@@ -1,5 +1,6 @@
 import cPickle
 import pickle
+import numpy
 import numpy as np
 import os
 import time
@@ -436,15 +437,16 @@ def load_train_file(config_file_path):
     return yaml_parse.load_path(config_file_path)
 
 
-def save_params_to_pytables(filepath, params, container_name='params', desc='', on_overwrite='ignore', filters=None):
+def save_params_to_pytables(filepath, params, container_name='params', desc='', on_overwrite='ignore', filters=None, params_symbolic=True):
     """Makes an hdf5 file with params
     path: filename of the param dump
     params: dictionary with {'param_name': value}
     desc: optional comment to save in file
     filters: use this, to specify different than default options to tables
+    params_symbolic: if True, means they are Theano variables
     """
 
-    def save_pytables(filepath, params, container_name, desc, filters):
+    def save_pytables_symbolic(filepath, params, container_name, desc, filters):
         if filters is None:
             filters = tables.Filters(complib='zlib', complevel=1)
         with tables.open_file(filepath, mode = "w", \
@@ -461,13 +463,32 @@ def save_params_to_pytables(filepath, params, container_name='params', desc='', 
 
                 print 'ModelPyTables: exporting param %s with shape %s and dtype %s'%(param.name, p_value.shape, p_value.dtype)
 
+    def save_pytables_raw(filepath, params, container_name, desc, filters):
+        if filters is None:
+            filters = tables.Filters(complib='zlib', complevel=1)
+        with tables.open_file(filepath, mode = "w", \
+                              title = "Model parameters: %s"%filepath) as h5file:
+            gcolumns = h5file.create_group(h5file.root, container_name, desc)
+
+            for p_name, p_value in params.iteritems():
+                p_atom = tables.Atom.from_dtype(p_value.dtype)
+                p_array = h5file.createCArray(gcolumns, p_name, atom=p_atom, shape=p_value.shape,
+                                title=p_name, filters=filters)
+                p_array[:] = p_value
+                h5file.flush()
+
+                print 'ModelPyTables: exporting param %s with shape %s and dtype %s'%(p_name, p_value.shape, p_value.dtype)
+
     filepath = preprocess(filepath)
 
     if os.path.exists(filepath):
         if on_overwrite == 'backup':
             backup = filepath + '.bak'
             shutil.move(filepath, backup)
-            save_pytables(filepath, params, container_name, desc, filters)
+            if params_symbolic:
+                save_pytables_symbolic(filepath, params, container_name, desc, filters)
+            else:
+                save_pytables_raw(filepath, params, container_name, desc, filters)
             try:
                 os.remove(backup)
             except Exception, e:
@@ -476,7 +497,10 @@ def save_params_to_pytables(filepath, params, container_name='params', desc='', 
         else:
             assert on_overwrite == 'ignore'
 
-    save_pytables(filepath,params, container_name, desc, filters)
+    if params_symbolic:
+        save_pytables_symbolic(filepath, params, container_name, desc, filters)
+    else:
+        save_pytables_raw(filepath, params, container_name, desc, filters)
 
 
 def load_params_from_pytables(filepath, container_name=None):
@@ -504,3 +528,181 @@ def load_params_from_pytables(filepath, container_name=None):
 
     return params
 
+
+def export_weights_to_kaldi(kaldi_nnet_file, pytables_file, container_name=None):
+    """
+    This function is full of hacks and written for single experiment only
+    """
+
+    params = load_params_from_pytables(pytables_file, container_name)
+    num_layers = len(params) / 2
+    with open(kaldi_nnet_file, 'w') as f:
+
+        for i in xrange(0, num_layers - 1):
+
+            print 'Exporting h%d_W' % i
+            W = params['h%d_W' % i]
+            print 'Exporting h%d_b' % i
+            b = params['h%d_b' % i]
+
+            print >> f, '<affinetransform>', W.shape[1], W.shape[0]
+            print >> f, '[ ',
+            for i in xrange(W.shape[1]):
+                for j in xrange(W.shape[0]):
+                    f.write('%f ' % W[j,i])
+                if i != (W.shape[1]-1):
+                    print >> f, ' '
+            print >> f, ']'
+            #bias vector
+            print >> f, '[ ',
+            for i in xrange(b.shape[0]):
+                f.write('%f ' % b[i])
+            print >> f, ']'
+            print >> f, '<sigmoid>', W.shape[1],  W.shape[1]
+
+        #logistic regression + softmax
+        W = params['softmax_W']
+        b = params['softmax_b']
+
+        print >> f, '<affinetransform>', W.shape[1], W.shape[0]
+        print >> f, '[ ',
+        for i in xrange(W.shape[1]):
+            for j in xrange(W.shape[0]):
+                f.write('%f ' % W[j, i])
+            if i!=(W.shape[1]-1): print >> f, ' '
+        print >> f, ']'
+        #bias vector
+        print >> f, '[ ',
+        for i in xrange(b.shape[0]):
+            f.write('%f '%b[i])
+        print >> f, ']'
+        print >> f, '<softmax>', W.shape[1], W.shape[1]
+
+    return None
+
+
+def kaldi_to_pytables(kaldi_nnet_file, pytables_file=None, container_name=None):
+    """
+    This function is full of hacks and written for single experiment only
+    """
+    from collections import OrderedDict
+    from pylearn2.datasets.speech_utils.kaldi_providers import read_kaldi_matrix, read_uttid
+
+    def get_affine(f):
+        p1, rows = struct.unpack('<bi', f.read(5))
+        p2, cols = struct.unpack('<bi', f.read(5))
+        t1= read_uttid(f)
+        __, lrcoef = struct.unpack('<bf', f.read(5))
+        t2= read_uttid(f)
+        __, bcoef = struct.unpack('<bf', f.read(5))
+        t3= read_uttid(f)
+        __, mnorm = struct.unpack('<bf', f.read(5))
+        #print t1, t2, t3, lrcoef, bcoef, mnorm
+        W = read_kaldi_matrix(f, skip_binary_preamble=True)
+        b = read_kaldi_matrix(f, skip_binary_preamble=True)
+        return W.T, b #kaldi has different orientation
+
+    tokens = ['<AffineTransform>', '<Softmax>', '<Sigmoid>', '<Nnet>',
+              '</Nnet>', '<LearnRateCoef>', '<BiasLearnRateCoef>',
+              '<MaxNorm>', '<Splice>', '<AddShift>', '<Rescale>']
+
+    layers = []
+    with open(kaldi_nnet_file, 'rb') as f:
+
+        mode = struct.unpack('<xc', f.read(2))
+        if mode[0] != "B":
+            raise ValueError('Only binary loading is supported, got %s'%mode[0])
+
+        token = read_uttid(f)
+        assert token == "<Nnet>", (
+            'Got %s'%token
+        )
+
+        while f.read(1):
+            f.seek(-1, 1)
+
+            token = read_uttid(f)
+            assert token in tokens, (
+                "Expected token, got %s"%token
+            )
+
+            if token == "<AffineTransform>":
+                W, b = get_affine(f)
+                #print 'Loaded weights and biases, shapes are:', W.shape, b.shape
+                layers.append(OrderedDict([('W', W), ('b', b)]))
+            elif token == "<Sigmoid>":
+                __, dim1 = struct.unpack('<bi', f.read(5))
+                __, dim2 = struct.unpack('<bi', f.read(5))
+                assert dim1 == dim2, (
+                    "Dims should be the same for sigmoid"
+                )
+                #print 'Loaded Sigmoid non-linearity with dim', dim1
+                #layers.append('Sigmoid')
+            elif token == '<Softmax>':
+                __, dim1 = struct.unpack('<bi', f.read(5))
+                __, dim2 = struct.unpack('<bi', f.read(5))
+                assert dim1 == dim2, (
+                    "Dims should be the same for softmax"
+                )
+                #print 'Loaded Softmax non-linearity with dim', dim1
+                #layers.append('Softmax')
+            elif token == '<Splice>':
+                __, dim1 = struct.unpack('<bi', f.read(5))
+                __, dim2 = struct.unpack('<bi', f.read(5))
+                #print 'Loaded splice component with', splice
+                splice = read_kaldi_matrix(f, skip_binary_preamble=True)
+                #can skip this
+            elif token == '<AddShift>':
+                __, dim1 = struct.unpack('<bi', f.read(5))
+                __, dim2 = struct.unpack('<bi', f.read(5))
+                t1= read_uttid(f)
+                __, lrcoef = struct.unpack('<bf', f.read(5))
+                shift = read_kaldi_matrix(f, skip_binary_preamble=True)
+                #print 'Loaded AddShift component with dims', dim1, dim2
+                layers.append(OrderedDict([('shift', shift)]))
+            elif token == '<Rescale>':
+                __, dim1 = struct.unpack('<bi', f.read(5))
+                __, dim2 = struct.unpack('<bi', f.read(5))
+                t1= read_uttid(f)
+                __, lrcoef = struct.unpack('<bf', f.read(5))
+                scale = read_kaldi_matrix(f, skip_binary_preamble=True)
+                #print 'Loaded Rescale component with dims', dim1, dim2
+                layers.append(OrderedDict([('scale', scale)]))
+            elif token == "</Nnet>":
+                #print 'Loaded all componentes!'
+                break;
+            else:
+                raise NotImplementedError('Token %s not yet supported' % token)
+
+    assert token == '</Nnet>', (
+        'Looks like loaded model is incomplete as the last '
+        'token is %s (should be </Nnet>)' % token
+    )
+
+    #in case file exists, load it and merge
+    params={}
+    if pytables_file is not None and os.path.isfile(pytables_file):
+        print 'Loading %s first (possibly to merge params)'
+        params = load_params_from_pytables(pytables_file)
+
+    #do the mapping
+    for i, param in enumerate(layers):
+        for key, value in param.iteritems():
+            prefix = 'h'
+            if key not in ['W', 'b']:
+                prefix = 'g'
+
+            if i < len(layers) - 1 or key not in ['W', 'b']:
+                keyf = '%s%d_%s' % (prefix, i, key)
+            else: #softmax otherwise
+                keyf = 'softmax_%s' % (key)
+
+            #if keyf in params:
+                #print 'The key exists, will override the param %s' % keyf
+            params[keyf] = value
+
+    if pytables_file is not None:
+        print 'Saving params %s to hdf container in %s' % (params.keys(), pytables_file)
+        save_params_to_pytables(pytables_file, params, params_symbolic=False)
+
+    return params
